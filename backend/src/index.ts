@@ -5,6 +5,7 @@ import cors from "cors";
 import roomsRouter from "./routes/rooms";
 import { createSignalingServer } from "./signaling/server";
 import { startExpiryJob } from "./jobs/expiry";
+import prisma from "./lib/prisma";
 
 const app = express();
 const PORT = process.env.PORT ?? 4000;
@@ -21,8 +22,32 @@ app.use(express.json());
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
-app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+app.get("/health", async (_req, res) => {
+  const start = Date.now();
+  let dbOk = false;
+  let dbLatencyMs: number | null = null;
+  let dbError: string | null = null;
+
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    dbLatencyMs = Date.now() - start;
+    dbOk = true;
+  } catch (err) {
+    dbLatencyMs = Date.now() - start;
+    dbError = err instanceof Error ? err.message : "unknown error";
+  }
+
+  const status = dbOk ? 200 : 503;
+
+  res.status(status).json({
+    ok: dbOk,
+    timestamp: new Date().toISOString(),
+    database: {
+      ok: dbOk,
+      latencyMs: dbLatencyMs,
+      ...(dbError ? { error: dbError } : {}),
+    },
+  });
 });
 
 app.use("/rooms", roomsRouter);
