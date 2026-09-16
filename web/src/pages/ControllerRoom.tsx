@@ -101,13 +101,17 @@ export default function ControllerRoom() {
       pc.addTransceiver("video", { direction: "recvonly" });
 
       pc.ontrack = (e) => {
-        if (videoRef.current && e.streams[0]) {
-          videoRef.current.srcObject = e.streams[0];
-          // Attempt autoplay; show tap-to-start if blocked
-          videoRef.current.play().catch(() => setNeedsTap(true));
+        console.log("[controller] ontrack fired", e.track.kind, e.streams.length);
+        const stream = e.streams[0] ?? new MediaStream([e.track]);
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play()
+            .then(() => console.log("[controller] video playing"))
+            .catch((err) => {
+              console.warn("[controller] autoplay blocked:", err);
+              setNeedsTap(true);
+            });
           setStatus("connected");
-          // If DataChannel hasn't opened 3s after track arrives,
-          // participant is in browser mode — mark view-only
           setTimeout(() => {
             if (dcRef.current?.readyState !== "open") {
               setViewOnly(true);
@@ -123,6 +127,7 @@ export default function ControllerRoom() {
       };
 
       pc.onconnectionstatechange = () => {
+        console.log("[controller] connection state:", pc.connectionState);
         if (
           pc.connectionState === "failed" ||
           pc.connectionState === "disconnected" ||
@@ -131,6 +136,10 @@ export default function ControllerRoom() {
           cleanup();
           navigate("/");
         }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        console.log("[controller] ICE state:", pc.iceConnectionState);
       };
 
       const offer = await pc.createOffer();
@@ -514,16 +523,19 @@ export default function ControllerRoom() {
           onTouchCancel={viewOnly ? undefined : handleTouchEnd}
         />
 
-        {/* Tap-to-start overlay (shown when autoplay is blocked) */}
+        {/* Tap-to-start overlay — fixed fullscreen so it's always visible on mobile */}
         {needsTap && (
           <button
-            className="absolute inset-0 flex items-center justify-center bg-black/70 text-white text-lg font-semibold"
+            className="fixed inset-0 z-40 flex flex-col items-center justify-center bg-gray-950 text-white gap-4"
             onClick={() => {
-              videoRef.current?.play();
-              setNeedsTap(false);
+              videoRef.current?.play()
+                .then(() => setNeedsTap(false))
+                .catch(() => {}); // still blocked — keep overlay
             }}
           >
-            Tap to start
+            <span className="text-5xl">▶</span>
+            <span className="text-xl font-semibold">Tap to view screen</span>
+            <span className="text-sm text-gray-400">Tap anywhere to start the remote stream</span>
           </button>
         )}
       </div>
