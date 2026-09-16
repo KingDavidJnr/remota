@@ -14,10 +14,13 @@ export default function BrowserSession() {
   const sigRef = useRef<SignalingClient | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const micTrackRef = useRef<MediaStreamTrack | null>(null);
 
   const [status, setStatus] = useState<Status>("requesting");
   const [error, setError] = useState<string | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [micMuted, setMicMuted] = useState(false);
+  const [hasMic, setHasMic] = useState(false);
 
   useEffect(() => {
     if (!token) return;
@@ -95,8 +98,11 @@ export default function BrowserSession() {
       // Step 3 — request mic audio (optional — user can deny)
       try {
         const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        for (const track of micStream.getAudioTracks()) {
-          stream.addTrack(track);
+        const micTrack = micStream.getAudioTracks()[0];
+        if (micTrack) {
+          stream.addTrack(micTrack);
+          micTrackRef.current = micTrack;
+          setHasMic(true);
         }
       } catch {
         // Mic denied or unavailable — continue without audio
@@ -141,6 +147,8 @@ export default function BrowserSession() {
     function cleanup() {
       clearSession();
       streamRef.current?.getTracks().forEach((t) => t.stop());
+      micTrackRef.current?.stop();
+      micTrackRef.current = null;
       sig.close();
       pcRef.current?.close();
       setStatus("ended");
@@ -149,6 +157,13 @@ export default function BrowserSession() {
     void start();
     return () => cleanup();
   }, [token]);
+
+  function handleMicToggle() {
+    const track = micTrackRef.current;
+    if (!track) return;
+    track.enabled = !track.enabled;
+    setMicMuted(!track.enabled);
+  }
 
   function handleTerminate() {
     setShowConfirm(true);
@@ -215,6 +230,21 @@ export default function BrowserSession() {
         <div className="bg-blue-900/20 border border-blue-800 text-blue-300 text-sm rounded-xl px-5 py-3 max-w-sm w-full text-center">
           🌐 Browser mode — view only. No mouse or keyboard control.
         </div>
+      )}
+
+      {/* Mic mute toggle */}
+      {hasMic && (
+        <button
+          onClick={handleMicToggle}
+          className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium text-sm transition-colors ${
+            micMuted
+              ? "bg-red-900/40 border border-red-700 text-red-400 hover:bg-red-900/60"
+              : "bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700"
+          }`}
+        >
+          <span>{micMuted ? "🔇" : "🎙️"}</span>
+          <span>{micMuted ? "Unmute mic" : "Mute mic"}</span>
+        </button>
       )}
 
       <button
