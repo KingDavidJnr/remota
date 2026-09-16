@@ -25,9 +25,6 @@ export default function ParticipantSession() {
   // Deep-link URI that the desktop app can be launched with.
   // The OS will pass it to the registered remota:// protocol handler.
   const deepLink = `remota://session/${token ?? ""}`;
-  const wsBase = (import.meta.env.VITE_BACKEND_URL as string)
-    .replace(/^https/, "wss")
-    .replace(/^http/, "ws");
 
   useEffect(() => {
     if (!token) return;
