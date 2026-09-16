@@ -1,16 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { SignalingClient } from "../lib/signaling";
-
-// The web participant page does NOT do WebRTC or screen capture.
-// Its only job is:
-//   1. Show the participant a "launch the desktop app" instruction.
-//   2. Provide the token the desktop app needs (via deep-link or copy).
-//   3. Listen on the signaling socket so it can show live status
-//      (waiting → active) and surface an "End Connection" button.
-//
-// The Rust desktop endpoint joins as "participant" over WebSocket, does the
-// actual screen capture and WebRTC, and signals "active" when connected.
+import { saveSession, clearSession } from "../lib/session";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 type SessionStatus = "waiting_for_app" | "active" | "ended";
 
@@ -21,28 +13,29 @@ export default function ParticipantSession() {
   const sigRef = useRef<SignalingClient | null>(null);
   const [status, setStatus] = useState<SessionStatus>("waiting_for_app");
   const [copied, setCopied] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
 
-  // Deep-link URI that the desktop app can be launched with.
-  // The OS will pass it to the registered remota:// protocol handler.
   const deepLink = `remota://session/${token ?? ""}`;
 
   useEffect(() => {
     if (!token) return;
 
-    // Connect to signaling as an observer (no role) so we can watch for
-    // the "active" and "terminate" events from the desktop endpoint.
-    // We intentionally do NOT join as "participant" — that's the desktop's job.
     const sig = new SignalingClient();
     sigRef.current = sig;
+
+    // Save session for refresh recovery
+    saveSession({ token, role: "participant-desktop", path: `/session/${token}` });
+
+    const beforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+    window.addEventListener("beforeunload", beforeUnload);
 
     async function watch() {
       await sig.connect();
 
       sig.onMessage((msg) => {
-        if (msg.type === "active") {
-          setStatus("active");
-        }
+        if (msg.type === "active") setStatus("active");
         if (msg.type === "terminate" || msg.type === "participant_left") {
+          clearSession();
           setStatus("ended");
           setTimeout(() => navigate("/"), 2000);
         }
@@ -56,6 +49,7 @@ export default function ParticipantSession() {
     void watch();
 
     return () => {
+      window.removeEventListener("beforeunload", beforeUnload);
       sig.close();
     };
   }, [token, navigate]);
@@ -67,6 +61,11 @@ export default function ParticipantSession() {
   }
 
   function handleTerminate() {
+    setShowConfirm(true);
+  }
+
+  function confirmTerminate() {
+    clearSession();
     sigRef.current?.send({ type: "terminate" });
     sigRef.current?.close();
     navigate("/");
@@ -83,7 +82,6 @@ export default function ParticipantSession() {
   return (
     <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center gap-8 px-4">
 
-      {/* Status indicator */}
       <div className="flex flex-col items-center gap-2 text-center">
         <div className="flex items-center gap-2">
           <span className={`w-2.5 h-2.5 rounded-full inline-block ${
@@ -100,20 +98,16 @@ export default function ParticipantSession() {
         </p>
       </div>
 
-      {/* Launch / token instructions */}
       {status === "waiting_for_app" && (
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 max-w-md w-full flex flex-col gap-4">
           <h3 className="font-semibold text-sm text-gray-300 uppercase tracking-wide">
             How to connect
           </h3>
-
           <ol className="text-sm text-gray-400 flex flex-col gap-3 list-decimal list-inside">
             <li>Download and open <strong className="text-white">Remota Desktop</strong> on this computer.</li>
             <li>Enter the session token below, or click the launch button.</li>
             <li>Grant the requested screen recording and accessibility permissions.</li>
           </ol>
-
-          {/* Token display */}
           <div className="flex flex-col gap-1">
             <p className="text-xs text-gray-500 uppercase tracking-wide">Session token</p>
             <div className="flex items-center gap-2">
@@ -128,15 +122,12 @@ export default function ParticipantSession() {
               </button>
             </div>
           </div>
-
-          {/* Deep-link launch button */}
           <a
             href={deepLink}
             className="w-full bg-blue-600 hover:bg-blue-500 text-white font-semibold py-3 rounded-xl transition-colors text-center text-sm"
           >
             Launch Remota Desktop
           </a>
-
           <p className="text-xs text-gray-600 text-center">
             The launch button works if Remota Desktop is already installed.
             You can also start it manually and paste the token.
@@ -144,7 +135,6 @@ export default function ParticipantSession() {
         </div>
       )}
 
-      {/* Active session info */}
       {status === "active" && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 text-sm text-gray-400 max-w-sm w-full text-center">
           Remote control is in progress. You can end it at any time below.
@@ -157,6 +147,15 @@ export default function ParticipantSession() {
       >
         End Connection
       </button>
+
+      {showConfirm && (
+        <ConfirmDialog
+          message="Are you sure you want to end this connection? The session will be terminated for both parties."
+          confirmLabel="End Connection"
+          onConfirm={confirmTerminate}
+          onCancel={() => setShowConfirm(false)}
+        />
+      )}
     </div>
   );
 }
