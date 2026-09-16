@@ -82,6 +82,12 @@ export default function ControllerRoom() {
       dcRef.current = dc;
       dc.onopen = () => setViewOnly(false);
 
+      // Add a recvonly video transceiver so the offer includes a video m-line.
+      // This is required for both browser mode (getDisplayMedia) and desktop
+      // mode (Rust VP8 track) — without this the offer won't negotiate video
+      // and the participant's track will never be received.
+      pc.addTransceiver("video", { direction: "recvonly" });
+
       pc.ontrack = (e) => {
         if (videoRef.current && e.streams[0]) {
           videoRef.current.srcObject = e.streams[0];
