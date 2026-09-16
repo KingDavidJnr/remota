@@ -11,6 +11,8 @@ import prisma from "./lib/prisma";
 const app = express();
 const PORT = process.env.PORT ?? 4000;
 
+app.set("trust proxy", 1);
+
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
 app.use(
