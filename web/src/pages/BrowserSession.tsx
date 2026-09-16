@@ -3,10 +3,6 @@ import { useNavigate, useParams } from "react-router-dom";
 import { SignalingClient } from "../lib/signaling";
 import { buildIceServers } from "../lib/ice";
 
-// Browser-based participant session.
-// The participant shares their screen via getDisplayMedia — no desktop app needed.
-// The controller can view the screen but cannot inject input (view-only mode).
-
 type Status = "requesting" | "connecting" | "active" | "ended";
 
 export default function BrowserSession() {
@@ -26,8 +22,51 @@ export default function BrowserSession() {
     const sig = new SignalingClient();
     sigRef.current = sig;
 
+    // Buffer for messages that arrive before the PC is ready
+    const pendingMessages: Array<Record<string, unknown> & { type: string }> = [];
+    let pc: RTCPeerConnection | null = null;
+
+    async function handleSignalMessage(msg: Record<string, unknown> & { type: string }) {
+      if (!pc) {
+        // PC not ready yet — buffer the message
+        pendingMessages.push(msg);
+        return;
+      }
+      await processMessage(pc, msg);
+    }
+
+    async function processMessage(pc: RTCPeerConnection, msg: Record<string, unknown> & { type: string }) {
+      if (msg.type === "offer") {
+        await pc.setRemoteDescription(
+          new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
+        );
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        sig.send({ type: "answer", sdp: pc.localDescription });
+      }
+
+      if (msg.type === "ice_candidate" && msg.candidate) {
+        try {
+          await pc.addIceCandidate(
+            new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
+          );
+        } catch { /* ignore candidates before remote description */ }
+      }
+
+      if (msg.type === "terminate") {
+        cleanup();
+      }
+    }
+
     async function start() {
-      // Step 1 — request screen capture permission
+      // Step 1 — connect to signaling immediately and register handler
+      // BEFORE showing the getDisplayMedia picker, so we never miss the offer
+      await sig.connect();
+      sig.onMessage(handleSignalMessage);
+      sig.onClose(() => cleanup());
+      sig.send({ type: "join", token, role: "participant" });
+
+      // Step 2 — request screen capture (shows picker dialog)
       let stream: MediaStream;
       try {
         stream = await navigator.mediaDevices.getDisplayMedia({
@@ -41,22 +80,14 @@ export default function BrowserSession() {
         return;
       }
 
-      // If the user stops sharing via the browser's built-in stop button
-      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
-        handleTerminate();
-      });
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => cleanup());
 
       setStatus("connecting");
 
-      // Step 2 — connect to signaling as participant
-      await sig.connect();
-      sig.send({ type: "join", token, role: "participant" });
-
-      // Step 3 — set up peer connection
-      const pc = new RTCPeerConnection({ iceServers: buildIceServers() });
+      // Step 3 — set up peer connection with the captured stream
+      pc = new RTCPeerConnection({ iceServers: buildIceServers() });
       pcRef.current = pc;
 
-      // Add screen capture tracks
       for (const track of stream.getTracks()) {
         pc.addTrack(track, stream);
       }
@@ -68,58 +99,35 @@ export default function BrowserSession() {
       };
 
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "connected") {
+        if (pc!.connectionState === "connected") {
           setStatus("active");
-          // Notify server and controller that session is active
           sig.send({ type: "active" });
         }
         if (
-          pc.connectionState === "failed" ||
-          pc.connectionState === "disconnected" ||
-          pc.connectionState === "closed"
+          pc!.connectionState === "failed" ||
+          pc!.connectionState === "disconnected" ||
+          pc!.connectionState === "closed"
         ) {
-          cleanup(stream);
+          cleanup();
         }
       };
 
-      sig.onMessage(async (msg) => {
-        if (msg.type === "offer") {
-          await pc.setRemoteDescription(
-            new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
-          );
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          sig.send({ type: "answer", sdp: pc.localDescription });
-        }
-
-        if (msg.type === "ice_candidate" && msg.candidate) {
-          await pc.addIceCandidate(
-            new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
-          );
-        }
-
-        if (msg.type === "terminate") {
-          cleanup(stream);
-        }
-      });
-
-      sig.onClose(() => cleanup(stream));
+      // Step 4 — drain any buffered messages that arrived during getDisplayMedia
+      for (const msg of pendingMessages.splice(0)) {
+        await processMessage(pc, msg);
+      }
     }
 
-    void start();
-
-    return () => {
-      const s = streamRef.current;
-      if (s) cleanup(s);
-    };
-
-    function cleanup(stream: MediaStream) {
-      stream.getTracks().forEach((t) => t.stop());
+    function cleanup() {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
       sig.close();
       pcRef.current?.close();
       setStatus("ended");
     }
-  }, [token, navigate]);
+
+    void start();
+    return () => cleanup();
+  }, [token]);
 
   function handleTerminate() {
     sigRef.current?.send({ type: "terminate" });
@@ -129,7 +137,6 @@ export default function BrowserSession() {
     navigate("/");
   }
 
-  // ── Requesting permission ──────────────────────────────────────────────────
   if (status === "requesting") {
     return (
       <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center">
@@ -138,7 +145,6 @@ export default function BrowserSession() {
     );
   }
 
-  // ── Error ──────────────────────────────────────────────────────────────────
   if (status === "ended" && error) {
     return (
       <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center gap-4 px-4">
@@ -153,7 +159,6 @@ export default function BrowserSession() {
     );
   }
 
-  // ── Ended ──────────────────────────────────────────────────────────────────
   if (status === "ended") {
     return (
       <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center">
@@ -162,7 +167,6 @@ export default function BrowserSession() {
     );
   }
 
-  // ── Connecting / Active ────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center gap-8 px-4">
       <div className="flex flex-col items-center gap-2 text-center">
