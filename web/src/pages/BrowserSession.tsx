@@ -1,0 +1,198 @@
+import { useEffect, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { SignalingClient } from "../lib/signaling";
+import { buildIceServers } from "../lib/ice";
+
+// Browser-based participant session.
+// The participant shares their screen via getDisplayMedia — no desktop app needed.
+// The controller can view the screen but cannot inject input (view-only mode).
+
+type Status = "requesting" | "connecting" | "active" | "ended";
+
+export default function BrowserSession() {
+  const { token } = useParams<{ token: string }>();
+  const navigate = useNavigate();
+
+  const sigRef = useRef<SignalingClient | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  const [status, setStatus] = useState<Status>("requesting");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!token) return;
+
+    const sig = new SignalingClient();
+    sigRef.current = sig;
+
+    async function start() {
+      // Step 1 — request screen capture permission
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: 30 },
+          audio: false,
+        });
+        streamRef.current = stream;
+      } catch {
+        setError("Screen sharing was denied or cancelled.");
+        setStatus("ended");
+        return;
+      }
+
+      // If the user stops sharing via the browser's built-in stop button
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
+        handleTerminate();
+      });
+
+      setStatus("connecting");
+
+      // Step 2 — connect to signaling as participant
+      await sig.connect();
+      sig.send({ type: "join", token, role: "participant" });
+
+      // Step 3 — set up peer connection
+      const pc = new RTCPeerConnection({ iceServers: buildIceServers() });
+      pcRef.current = pc;
+
+      // Add screen capture tracks
+      for (const track of stream.getTracks()) {
+        pc.addTrack(track, stream);
+      }
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          sig.send({ type: "ice_candidate", candidate: e.candidate.toJSON() });
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "connected") {
+          setStatus("active");
+          // Notify server and controller that session is active
+          sig.send({ type: "active" });
+        }
+        if (
+          pc.connectionState === "failed" ||
+          pc.connectionState === "disconnected" ||
+          pc.connectionState === "closed"
+        ) {
+          cleanup(stream);
+        }
+      };
+
+      sig.onMessage(async (msg) => {
+        if (msg.type === "offer") {
+          await pc.setRemoteDescription(
+            new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
+          );
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          sig.send({ type: "answer", sdp: pc.localDescription });
+        }
+
+        if (msg.type === "ice_candidate" && msg.candidate) {
+          await pc.addIceCandidate(
+            new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
+          );
+        }
+
+        if (msg.type === "terminate") {
+          cleanup(stream);
+        }
+      });
+
+      sig.onClose(() => cleanup(stream));
+    }
+
+    void start();
+
+    return () => {
+      const s = streamRef.current;
+      if (s) cleanup(s);
+    };
+
+    function cleanup(stream: MediaStream) {
+      stream.getTracks().forEach((t) => t.stop());
+      sig.close();
+      pcRef.current?.close();
+      setStatus("ended");
+    }
+  }, [token, navigate]);
+
+  function handleTerminate() {
+    sigRef.current?.send({ type: "terminate" });
+    sigRef.current?.close();
+    pcRef.current?.close();
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    navigate("/");
+  }
+
+  // ── Requesting permission ──────────────────────────────────────────────────
+  if (status === "requesting") {
+    return (
+      <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center">
+        <p className="text-gray-400">Waiting for screen sharing permission…</p>
+      </div>
+    );
+  }
+
+  // ── Error ──────────────────────────────────────────────────────────────────
+  if (status === "ended" && error) {
+    return (
+      <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center gap-4 px-4">
+        <p className="text-red-400 text-sm">{error}</p>
+        <button
+          onClick={() => navigate("/")}
+          className="text-blue-400 hover:text-blue-300 text-sm transition-colors"
+        >
+          Go home
+        </button>
+      </div>
+    );
+  }
+
+  // ── Ended ──────────────────────────────────────────────────────────────────
+  if (status === "ended") {
+    return (
+      <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center">
+        <p className="text-gray-400">Connection ended.</p>
+      </div>
+    );
+  }
+
+  // ── Connecting / Active ────────────────────────────────────────────────────
+  return (
+    <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center gap-8 px-4">
+      <div className="flex flex-col items-center gap-2 text-center">
+        <div className="flex items-center gap-2">
+          <span className={`w-2.5 h-2.5 rounded-full inline-block animate-pulse ${
+            status === "active" ? "bg-green-400" : "bg-yellow-400"
+          }`} />
+          <span className={`font-medium ${status === "active" ? "text-green-400" : "text-yellow-400"}`}>
+            {status === "active" ? "Screen sharing is active" : "Establishing connection…"}
+          </span>
+        </div>
+        <p className="text-gray-400 text-sm max-w-sm">
+          {status === "active"
+            ? "The other person can see your screen. This is view-only — they cannot control your computer."
+            : "Connecting to the remote viewer…"}
+        </p>
+      </div>
+
+      {status === "active" && (
+        <div className="bg-blue-900/20 border border-blue-800 text-blue-300 text-sm rounded-xl px-5 py-3 max-w-sm w-full text-center">
+          🌐 Browser mode — view only. No mouse or keyboard control.
+        </div>
+      )}
+
+      <button
+        onClick={handleTerminate}
+        className="bg-red-600 hover:bg-red-500 text-white font-semibold px-6 py-2.5 rounded-xl transition-colors"
+      >
+        Stop Sharing
+      </button>
+    </div>
+  );
+}
