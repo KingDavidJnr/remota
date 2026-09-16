@@ -2,6 +2,7 @@ import "dotenv/config";
 import http from "http";
 import express from "express";
 import cors from "cors";
+import morgan from "morgan";
 import roomsRouter from "./routes/rooms";
 import { createSignalingServer } from "./signaling/server";
 import { startExpiryJob } from "./jobs/expiry";
@@ -19,6 +20,7 @@ app.use(
   })
 );
 app.use(express.json());
+app.use(morgan("common"));
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
