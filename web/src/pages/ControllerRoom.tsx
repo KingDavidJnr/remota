@@ -119,7 +119,10 @@ export default function ControllerRoom() {
           v.srcObject = stream;
           v.load();
           v.play()
-            .then(() => log("video playing"))
+            .then(() => {
+              log("video playing");
+              v.muted = false; // unmute now that autoplay succeeded
+            })
             .catch((err) => {
               log(`autoplay blocked: ${err}`);
               setNeedsTap(true);
@@ -533,7 +536,7 @@ export default function ControllerRoom() {
           ref={videoRef}
           autoPlay
           playsInline
-          muted
+          muted={needsTap} // muted until user gesture unlocks audio
           className="w-full h-full object-contain select-none touch-none bg-black"
           style={{ cursor: viewOnly ? "default" : "none" }}
           onPointerMove={viewOnly ? undefined : handlePointerMove}
@@ -554,7 +557,10 @@ export default function ControllerRoom() {
             className="fixed inset-0 z-40 flex flex-col items-center justify-center bg-gray-950 text-white gap-4"
             onClick={() => {
               videoRef.current?.play()
-                .then(() => setNeedsTap(false))
+                .then(() => {
+                  setNeedsTap(false);
+                  if (videoRef.current) videoRef.current.muted = false;
+                })
                 .catch(() => {}); // still blocked — keep overlay
             }}
           >

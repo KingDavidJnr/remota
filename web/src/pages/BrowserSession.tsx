@@ -81,7 +81,7 @@ export default function BrowserSession() {
       try {
         stream = await navigator.mediaDevices.getDisplayMedia({
           video: { frameRate: 30 },
-          audio: false,
+          audio: true, // captures system/tab audio if user allows it in the picker
         });
         streamRef.current = stream;
       } catch {
