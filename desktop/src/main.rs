@@ -213,5 +213,16 @@ fn get_primary_screen_dimensions() -> (u32, u32) {
             return (w as u32, h as u32);
         }
     }
+
+    #[cfg(target_os = "macos")]
+    {
+        use screencapturekit::prelude::SCShareableContent;
+        if let Ok(content) = SCShareableContent::get() {
+            if let Some(display) = content.displays().into_iter().next() {
+                return (display.width() as u32, display.height() as u32);
+            }
+        }
+    }
+
     (1920, 1080)
 }
