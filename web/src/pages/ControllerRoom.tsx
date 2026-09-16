@@ -53,7 +53,7 @@ export default function ControllerRoom() {
       sig.send({ type: "join", token, role: "controller" });
 
       // Save session so refresh can offer to resume
-      saveSession({ token, role: "controller", path: `/wait/${token}` });
+      saveSession({ token: token!, role: "controller", path: `/wait/${token}` });
 
       // Warn on refresh/close while session is active
       const beforeUnload = (e: BeforeUnloadEvent) => {

@@ -70,7 +70,7 @@ export default function BrowserSession() {
       sig.send({ type: "join", token, role: "participant" });
 
       // Save session for refresh recovery
-      saveSession({ token, role: "participant-browser", path: `/browser-session/${token}` });
+      saveSession({ token: token!, role: "participant-browser", path: `/browser-session/${token}` });
 
       // Warn on refresh while active
       const beforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); };
