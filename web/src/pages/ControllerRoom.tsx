@@ -110,21 +110,40 @@ export default function ControllerRoom() {
       pc.ontrack = (e) => {
         log(`ontrack: ${e.track.kind} streams=${e.streams.length}`);
         const stream = e.streams[0] ?? new MediaStream([e.track]);
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play()
-            .then(() => { log("video playing"); })
+
+        // Re-attach on every track event to handle renegotiation
+        const attachStream = () => {
+          const v = videoRef.current;
+          if (!v) return;
+          // Null then re-assign forces the decoder to reinitialise on mobile
+          v.srcObject = null;
+          v.srcObject = stream;
+          v.load();
+          v.play()
+            .then(() => log("video playing"))
             .catch((err) => {
               log(`autoplay blocked: ${err}`);
               setNeedsTap(true);
             });
-          setStatus("connected");
-          setTimeout(() => {
-            if (dcRef.current?.readyState !== "open") {
-              setViewOnly(true);
-            }
-          }, 3000);
-        }
+        };
+
+        attachStream();
+        setStatus("connected");
+
+        // Re-attach once more after a short delay — fixes black frame on
+        // some mobile Chrome versions where the decoder initialises late
+        setTimeout(() => {
+          if (videoRef.current?.readyState === 0) {
+            log("re-attaching stream (readyState=0)");
+            attachStream();
+          }
+        }, 1000);
+
+        setTimeout(() => {
+          if (dcRef.current?.readyState !== "open") {
+            setViewOnly(true);
+          }
+        }, 3000);
       };
 
       pc.onicecandidate = (e) => {
@@ -523,7 +542,9 @@ export default function ControllerRoom() {
           autoPlay
           playsInline
           muted
-          className="w-full h-full object-contain select-none touch-none"
+          // @ts-expect-error webkit-specific attribute for older mobile browsers
+          webkit-playsinline="true"
+          className="w-full h-full object-contain select-none touch-none bg-black"
           style={{ cursor: viewOnly ? "default" : "none" }}
           onPointerMove={viewOnly ? undefined : handlePointerMove}
           onPointerDown={viewOnly ? undefined : handlePointerDown}
