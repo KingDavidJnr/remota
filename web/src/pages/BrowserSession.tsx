@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { SignalingClient } from "../lib/signaling";
 import { buildIceServers } from "../lib/ice";
+import { saveSession, clearSession } from "../lib/session";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 type Status = "requesting" | "connecting" | "active" | "ended";
 
@@ -15,6 +17,7 @@ export default function BrowserSession() {
 
   const [status, setStatus] = useState<Status>("requesting");
   const [error, setError] = useState<string | null>(null);
+  const [showConfirm, setShowConfirm] = useState(false);
 
   useEffect(() => {
     if (!token) return;
@@ -65,6 +68,13 @@ export default function BrowserSession() {
       sig.onMessage(handleSignalMessage);
       sig.onClose(() => cleanup());
       sig.send({ type: "join", token, role: "participant" });
+
+      // Save session for refresh recovery
+      saveSession({ token, role: "participant-browser", path: `/browser-session/${token}` });
+
+      // Warn on refresh while active
+      const beforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+      window.addEventListener("beforeunload", beforeUnload);
 
       // Step 2 — request screen capture (shows picker dialog)
       let stream: MediaStream;
@@ -119,6 +129,7 @@ export default function BrowserSession() {
     }
 
     function cleanup() {
+      clearSession();
       streamRef.current?.getTracks().forEach((t) => t.stop());
       sig.close();
       pcRef.current?.close();
@@ -130,6 +141,11 @@ export default function BrowserSession() {
   }, [token]);
 
   function handleTerminate() {
+    setShowConfirm(true);
+  }
+
+  function confirmTerminate() {
+    clearSession();
     sigRef.current?.send({ type: "terminate" });
     sigRef.current?.close();
     pcRef.current?.close();
@@ -197,6 +213,15 @@ export default function BrowserSession() {
       >
         Stop Sharing
       </button>
+
+      {showConfirm && (
+        <ConfirmDialog
+          message="Are you sure you want to stop sharing? This will end the session for both parties."
+          confirmLabel="Stop Sharing"
+          onConfirm={confirmTerminate}
+          onCancel={() => setShowConfirm(false)}
+        />
+      )}
     </div>
   );
 }
