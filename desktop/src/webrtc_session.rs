@@ -40,35 +40,26 @@ use vpx::{
 };
 
 use crate::capture::CapturedFrame;
+use crate::config;
 use crate::protocol::ControlMessage;
 
 // ── ICE server list ───────────────────────────────────────────────────────────
 
-/// Build ICE server list from environment variables.
-///
-/// Required in env (or inherited from calling shell):
-///   REMOTA_STUN_URL   (optional, defaults to Google STUN)
-///   REMOTA_TURN_URL   e.g. turn:turn.remota.quickdesk.tech:3478
-///   REMOTA_TURN_USER
-///   REMOTA_TURN_PASS
+/// Build ICE server list from compile-time config constants.
+/// STUN always included. TURN added only when all three vars were set at build time.
 pub fn ice_servers() -> Vec<RTCIceServer> {
-    let stun_url = std::env::var("REMOTA_STUN_URL")
-        .unwrap_or_else(|_| "stun:stun.l.google.com:19302".to_owned());
-
     let mut servers = vec![RTCIceServer {
-        urls: vec![stun_url],
+        urls: vec!["stun:stun.l.google.com:19302".to_owned()],
         ..Default::default()
     }];
 
-    if let (Ok(url), Ok(user), Ok(pass)) = (
-        std::env::var("REMOTA_TURN_URL"),
-        std::env::var("REMOTA_TURN_USER"),
-        std::env::var("REMOTA_TURN_PASS"),
-    ) {
+    if let (Some(url), Some(user), Some(pass)) =
+        (config::TURN_URL, config::TURN_USER, config::TURN_PASS)
+    {
         servers.push(RTCIceServer {
-            urls: vec![url],
-            username: user,
-            credential: pass,
+            urls: vec![url.to_owned()],
+            username: user.to_owned(),
+            credential: pass.to_owned(),
             ..Default::default()
         });
     }
