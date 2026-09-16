@@ -20,6 +20,7 @@ export default function ControllerRoom() {
   const dcRef = useRef<RTCDataChannel | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const keyInputRef = useRef<HTMLInputElement>(null);
+  const micTrackRef = useRef<MediaStreamTrack | null>(null);
 
   const [status, setStatus] = useState<"waiting" | "connecting" | "connected" | "ended">("waiting");
   const [copied, setCopied] = useState(false);
@@ -27,6 +28,8 @@ export default function ControllerRoom() {
   const [needsTap, setNeedsTap] = useState(false);
   const [viewOnly, setViewOnly] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [micMuted, setMicMuted] = useState(false);
+  const [hasMic, setHasMic] = useState(false);
 
   function log(_msg: string) {
     // debug logging removed after fix confirmed
@@ -100,9 +103,26 @@ export default function ControllerRoom() {
       dcRef.current = dc;
       dc.onopen = () => setViewOnly(false);
 
-      // Add recvonly transceivers so the offer negotiates both video and audio.
+      // Capture controller mic (optional — continue without if denied)
+      try {
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const micTrack = micStream.getAudioTracks()[0];
+        if (micTrack) {
+          pc.addTrack(micTrack, micStream);
+          micTrackRef.current = micTrack;
+          setHasMic(true);
+        }
+      } catch {
+        // Mic denied — continue without
+      }
+
+      // video: recvonly (we only receive the screen)
+      // audio: sendrecv (we send mic, receive participant mic)
       pc.addTransceiver("video", { direction: "recvonly" });
-      pc.addTransceiver("audio", { direction: "recvonly" });
+      if (!micTrackRef.current) {
+        // No mic track added — still negotiate audio recvonly to hear participant
+        pc.addTransceiver("audio", { direction: "recvonly" });
+      }
 
       pc.ontrack = (e) => {
         log(`ontrack: ${e.track.kind} streams=${e.streams.length}`);
@@ -179,11 +199,21 @@ export default function ControllerRoom() {
     function cleanup() {
       clearSession();
       window.removeEventListener("beforeunload", () => {});
+      micTrackRef.current?.stop();
+      micTrackRef.current = null;
       sig.close();
       pc?.close();
       setStatus("ended");
     }
   }, [token, navigate]);
+
+  // ── Mic toggle ────────────────────────────────────────────────────────────
+  function handleMicToggle() {
+    const track = micTrackRef.current;
+    if (!track) return;
+    track.enabled = !track.enabled;
+    setMicMuted(!track.enabled);
+  }
 
   // ── Control message sender ────────────────────────────────────────────────
   const sendControl = useCallback((msg: object) => {
@@ -517,6 +547,20 @@ export default function ControllerRoom() {
               aria-label="Toggle keyboard"
             >
               ⌨
+            </button>
+          )}
+          {/* Mic toggle */}
+          {hasMic && (
+            <button
+              onClick={handleMicToggle}
+              className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                micMuted
+                  ? "bg-red-900/60 text-red-400 hover:bg-red-900"
+                  : "bg-gray-800 text-gray-300 hover:bg-gray-700"
+              }`}
+              aria-label={micMuted ? "Unmute mic" : "Mute mic"}
+            >
+              {micMuted ? "🔇" : "🎙️"}
             </button>
           )}
           <button
