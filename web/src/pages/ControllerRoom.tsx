@@ -542,8 +542,6 @@ export default function ControllerRoom() {
           autoPlay
           playsInline
           muted
-          // @ts-expect-error webkit-specific attribute for older mobile browsers
-          webkit-playsinline="true"
           className="w-full h-full object-contain select-none touch-none bg-black"
           style={{ cursor: viewOnly ? "default" : "none" }}
           onPointerMove={viewOnly ? undefined : handlePointerMove}
