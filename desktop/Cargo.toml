@@ -22,10 +22,7 @@ futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Screen capture (Windows-native WinRT capture API)
-windows-capture = "2"
-
-# Mouse / keyboard injection
+# Mouse / keyboard injection (cross-platform)
 enigo = "0.2"
 
 # VP8 video encoding (BGRA → I420 → VP8)
@@ -38,10 +35,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
 
-# Win32 API (screen dimensions, Windows only)
+# ── Windows-only ──────────────────────────────────────────────────────────────
 [target.'cfg(target_os = "windows")'.dependencies]
+windows-capture = "2"
 windows = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 winreg = "0.56"
+
+# ── macOS-only ────────────────────────────────────────────────────────────────
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "10", features = ["async"] }
 
 [profile.release]
 opt-level = 3
