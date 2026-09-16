@@ -3,11 +3,13 @@ import { useNavigate, useParams } from "react-router-dom";
 import { SignalingClient } from "../lib/signaling";
 import { buildIceServers } from "../lib/ice";
 import { normalizePointer } from "../lib/control";
+import { saveSession, clearSession } from "../lib/session";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 // ── Touch gesture constants ───────────────────────────────────────────────────
-const LONG_PRESS_MS = 600;    // hold duration → right click
-const DOUBLE_TAP_MS = 300;    // max gap between taps → double click
-const DRAG_THRESHOLD_PX = 8;  // movement before a tap becomes a drag
+const LONG_PRESS_MS = 600;
+const DOUBLE_TAP_MS = 300;
+const DRAG_THRESHOLD_PX = 8;
 
 export default function ControllerRoom() {
   const { token } = useParams<{ token: string }>();
@@ -22,8 +24,9 @@ export default function ControllerRoom() {
   const [status, setStatus] = useState<"waiting" | "connecting" | "connected" | "ended">("waiting");
   const [copied, setCopied] = useState(false);
   const [showKeyboard, setShowKeyboard] = useState(false);
-  const [needsTap, setNeedsTap] = useState(false); // autoplay blocked fallback
-  const [viewOnly, setViewOnly] = useState(false); // true when participant is in browser mode
+  const [needsTap, setNeedsTap] = useState(false);
+  const [viewOnly, setViewOnly] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
 
   const joinUrl = `${window.location.origin}/join/${token ?? ""}`;
 
@@ -48,6 +51,15 @@ export default function ControllerRoom() {
     async function start() {
       await sig.connect();
       sig.send({ type: "join", token, role: "controller" });
+
+      // Save session so refresh can offer to resume
+      saveSession({ token, role: "controller", path: `/wait/${token}` });
+
+      // Warn on refresh/close while session is active
+      const beforeUnload = (e: BeforeUnloadEvent) => {
+        e.preventDefault();
+      };
+      window.addEventListener("beforeunload", beforeUnload);
 
       sig.onMessage(async (msg) => {
         if (msg.type === "participant_joined") {
@@ -130,6 +142,8 @@ export default function ControllerRoom() {
     return () => cleanup();
 
     function cleanup() {
+      clearSession();
+      window.removeEventListener("beforeunload", () => {});
       sig.close();
       pc?.close();
       setStatus("ended");
@@ -370,6 +384,11 @@ export default function ControllerRoom() {
   // ── Session control ───────────────────────────────────────────────────────
 
   function handleTerminate() {
+    setShowConfirm(true);
+  }
+
+  function confirmTerminate() {
+    clearSession();
     sigRef.current?.send({ type: "terminate" });
     sigRef.current?.close();
     pcRef.current?.close();
@@ -385,35 +404,46 @@ export default function ControllerRoom() {
   // ── Waiting / connecting ──────────────────────────────────────────────────
   if (status === "waiting" || status === "connecting") {
     return (
-      <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center gap-8 px-4">
-        <h2 className="text-2xl font-semibold">
-          {status === "waiting" ? "Waiting for participant…" : "Connecting…"}
-        </h2>
+      <>
+        <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center gap-8 px-4">
+          <h2 className="text-2xl font-semibold">
+            {status === "waiting" ? "Waiting for participant…" : "Connecting…"}
+          </h2>
 
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 flex flex-col gap-4 w-full max-w-md">
-          <p className="text-sm text-gray-400">Share this link with the participant:</p>
-          <div className="flex items-center gap-2">
-            <input
-              readOnly
-              value={joinUrl}
-              className="flex-1 bg-gray-800 text-sm text-gray-200 px-3 py-2 rounded-lg outline-none"
-            />
-            <button
-              onClick={handleCopy}
-              className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
-            >
-              {copied ? "Copied!" : "Copy"}
-            </button>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 flex flex-col gap-4 w-full max-w-md">
+            <p className="text-sm text-gray-400">Share this link with the participant:</p>
+            <div className="flex items-center gap-2">
+              <input
+                readOnly
+                value={joinUrl}
+                className="flex-1 bg-gray-800 text-sm text-gray-200 px-3 py-2 rounded-lg outline-none"
+              />
+              <button
+                onClick={handleCopy}
+                className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+              >
+                {copied ? "Copied!" : "Copy"}
+              </button>
+            </div>
           </div>
+
+          <button
+            onClick={handleTerminate}
+            className="text-red-400 hover:text-red-300 text-sm transition-colors"
+          >
+            End Connection
+          </button>
         </div>
 
-        <button
-          onClick={handleTerminate}
-          className="text-red-400 hover:text-red-300 text-sm transition-colors"
-        >
-          End Connection
-        </button>
-      </div>
+        {showConfirm && (
+          <ConfirmDialog
+            message="Are you sure you want to end this connection?"
+            confirmLabel="End Connection"
+            onConfirm={confirmTerminate}
+            onCancel={() => setShowConfirm(false)}
+          />
+        )}
+      </>
     );
   }
 
@@ -513,6 +543,16 @@ export default function ControllerRoom() {
         onKeyDown={handleSoftKeyDown}
         onBlur={() => setShowKeyboard(false)}
       />
+
+      {/* End connection confirmation */}
+      {showConfirm && (
+        <ConfirmDialog
+          message="Are you sure you want to end this connection? The session will be terminated for both parties."
+          confirmLabel="End Connection"
+          onConfirm={confirmTerminate}
+          onCancel={() => setShowConfirm(false)}
+        />
+      )}
     </div>
   );
 }
