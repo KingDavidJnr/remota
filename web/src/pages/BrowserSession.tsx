@@ -81,7 +81,7 @@ export default function BrowserSession() {
       try {
         stream = await navigator.mediaDevices.getDisplayMedia({
           video: { frameRate: 30 },
-          audio: true, // captures system/tab audio if user allows it in the picker
+          audio: false,
         });
         streamRef.current = stream;
       } catch {
@@ -92,9 +92,19 @@ export default function BrowserSession() {
 
       stream.getVideoTracks()[0]?.addEventListener("ended", () => cleanup());
 
+      // Step 3 — request mic audio (optional — user can deny)
+      try {
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        for (const track of micStream.getAudioTracks()) {
+          stream.addTrack(track);
+        }
+      } catch {
+        // Mic denied or unavailable — continue without audio
+      }
+
       setStatus("connecting");
 
-      // Step 3 — set up peer connection with the captured stream
+      // Step 4 — set up peer connection with screen + mic tracks
       pc = new RTCPeerConnection({ iceServers: buildIceServers() });
       pcRef.current = pc;
 
