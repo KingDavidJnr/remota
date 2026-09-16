@@ -41,6 +41,7 @@ tokio-util = { version = "0.7", features = ["codec"] }
 # Win32 API (screen dimensions, Windows only)
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+winreg = "0.56"
 
 [profile.release]
 opt-level = 3

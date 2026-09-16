@@ -2,19 +2,30 @@
 // Windows native application — runs as a visible console process so the
 // participant can see status messages and confirm remote control is active.
 //
-// Usage:
-//   remota-desktop.exe <BACKEND_WS_URL> <ROOM_TOKEN>
+// Invocation modes:
 //
-// Environment variables (alternative to / combined with CLI args):
-//   REMOTA_WS_URL       wss://api.remota.quickdesk.tech
-//   REMOTA_TOKEN        <room token from join link>
-//   REMOTA_TURN_URL     turn:turn.remota.quickdesk.tech:3478  (optional)
-//   REMOTA_TURN_USER    <coturn username>                      (optional)
-//   REMOTA_TURN_PASS    <coturn credential>                    (optional)
+//   1. Deep-link (browser launches the app automatically):
+//        remota-desktop.exe remota://session/<token>
+//        REMOTA_WS_URL must be set in the environment.
+//
+//   2. Manual (CLI):
+//        remota-desktop.exe <BACKEND_WS_URL> <ROOM_TOKEN>
+//
+//   3. Environment only:
+//        REMOTA_WS_URL=wss://... REMOTA_TOKEN=<token> remota-desktop.exe
+//
+// Optional environment variables:
+//   REMOTA_TURN_URL     turn:turn.remota.quickdesk.tech:3478
+//   REMOTA_TURN_USER    <coturn username>
+//   REMOTA_TURN_PASS    <coturn credential>
+//
+// On first run the app registers the remota:// URI scheme in HKCU so that
+// subsequent deep-link clicks open this executable automatically.
 
 mod capture;
 mod input;
 mod protocol;
+mod register;
 mod signaling;
 mod webrtc_session;
 
@@ -41,18 +52,44 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // ── Register remota:// protocol handler (no-op if already registered) ────
+    if let Err(e) = register::register_protocol_handler() {
+        // Non-fatal — app still works without the deep-link handler
+        tracing::warn!("[main] protocol handler registration failed: {e}");
+    }
+
     // ── Config ────────────────────────────────────────────────────────────────
+    // Arg 1 may be either:
+    //   a)  A deep-link URI:  remota://session/<token>
+    //   b)  The WS base URL:  wss://api.remota.quickdesk.tech  (legacy / manual)
     let args: Vec<String> = env::args().collect();
-    let ws_base = args
-        .get(1)
-        .cloned()
-        .or_else(|| env::var("REMOTA_WS_URL").ok())
-        .context("Pass WS URL as first argument or set REMOTA_WS_URL")?;
-    let token = args
-        .get(2)
-        .cloned()
-        .or_else(|| env::var("REMOTA_TOKEN").ok())
-        .context("Pass room token as second argument or set REMOTA_TOKEN")?;
+    let arg1 = args.get(1).cloned();
+
+    // Detect deep-link invocation from the browser
+    let (ws_base, token) = if let Some(ref uri) = arg1 {
+        if let Some(token) = register::parse_deep_link(uri) {
+            // Launched via remota://session/<token> — WS URL comes from env
+            let ws = env::var("REMOTA_WS_URL")
+                .context("REMOTA_WS_URL must be set when launching via deep-link")?;
+            (ws, token)
+        } else {
+            // Manual invocation: remota-desktop.exe <WS_URL> <TOKEN>
+            let ws = arg1.unwrap();
+            let tok = args
+                .get(2)
+                .cloned()
+                .or_else(|| env::var("REMOTA_TOKEN").ok())
+                .context("Pass room token as second argument or set REMOTA_TOKEN")?;
+            (ws, tok)
+        }
+    } else {
+        // No args — fall back entirely to env vars
+        let ws = env::var("REMOTA_WS_URL")
+            .context("Pass WS URL as first argument or set REMOTA_WS_URL")?;
+        let tok = env::var("REMOTA_TOKEN")
+            .context("Pass room token as second argument or set REMOTA_TOKEN")?;
+        (ws, tok)
+    };
 
     let ws_url = format!("{ws_base}/ws");
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
