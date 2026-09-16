@@ -27,6 +27,11 @@ export default function ControllerRoom() {
   const [needsTap, setNeedsTap] = useState(false);
   const [viewOnly, setViewOnly] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [debugLog, setDebugLog] = useState<string[]>([]);
+
+  function log(msg: string) {
+    setDebugLog((prev) => [...prev.slice(-6), `${new Date().toLocaleTimeString()}: ${msg}`]);
+  }
 
   const joinUrl = `${window.location.origin}/join/${token ?? ""}`;
 
@@ -50,6 +55,7 @@ export default function ControllerRoom() {
 
     async function start() {
       await sig.connect();
+      log("signaling connected");
       sig.send({ type: "join", token, role: "controller" });
 
       // Save session so refresh can offer to resume
@@ -63,6 +69,7 @@ export default function ControllerRoom() {
 
       sig.onMessage(async (msg) => {
         if (msg.type === "participant_joined") {
+          log("participant joined");
           setStatus("connecting");
           await startOffer();
         }
@@ -101,14 +108,14 @@ export default function ControllerRoom() {
       pc.addTransceiver("video", { direction: "recvonly" });
 
       pc.ontrack = (e) => {
-        console.log("[controller] ontrack fired", e.track.kind, e.streams.length);
+        log(`ontrack: ${e.track.kind} streams=${e.streams.length}`);
         const stream = e.streams[0] ?? new MediaStream([e.track]);
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.play()
-            .then(() => console.log("[controller] video playing"))
+            .then(() => { log("video playing"); })
             .catch((err) => {
-              console.warn("[controller] autoplay blocked:", err);
+              log(`autoplay blocked: ${err}`);
               setNeedsTap(true);
             });
           setStatus("connected");
@@ -127,7 +134,7 @@ export default function ControllerRoom() {
       };
 
       pc.onconnectionstatechange = () => {
-        console.log("[controller] connection state:", pc.connectionState);
+        log(`conn: ${pc.connectionState}`);
         if (
           pc.connectionState === "failed" ||
           pc.connectionState === "disconnected" ||
@@ -139,7 +146,7 @@ export default function ControllerRoom() {
       };
 
       pc.oniceconnectionstatechange = () => {
-        console.log("[controller] ICE state:", pc.iceConnectionState);
+        log(`ICE: ${pc.iceConnectionState}`);
       };
 
       const offer = await pc.createOffer();
@@ -452,6 +459,13 @@ export default function ControllerRoom() {
             onCancel={() => setShowConfirm(false)}
           />
         )}
+
+        {/* Debug log */}
+        {debugLog.length > 0 && (
+          <div className="fixed bottom-0 left-0 right-0 z-50 bg-black/80 text-green-400 text-xs font-mono p-2 flex flex-col gap-0.5 pointer-events-none">
+            {debugLog.map((line, i) => <span key={i}>{line}</span>)}
+          </div>
+        )}
       </>
     );
   }
@@ -539,6 +553,13 @@ export default function ControllerRoom() {
           </button>
         )}
       </div>
+
+      {/* Debug log — visible on screen for mobile debugging, remove after fix */}
+      {debugLog.length > 0 && (
+        <div className="fixed bottom-0 left-0 right-0 z-50 bg-black/80 text-green-400 text-xs font-mono p-2 flex flex-col gap-0.5 pointer-events-none">
+          {debugLog.map((line, i) => <span key={i}>{line}</span>)}
+        </div>
+      )}
 
       {/* Soft keyboard input (hidden, focused when keyboard toggle is on) */}
       <input
