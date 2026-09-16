@@ -4,6 +4,12 @@ import { getRoom } from "../lib/api";
 
 type Step = "consent" | "mode";
 
+// getDisplayMedia is desktop-only — not supported on any mobile browser
+const supportsDisplayMedia =
+  typeof navigator !== "undefined" &&
+  typeof navigator.mediaDevices?.getDisplayMedia === "function" &&
+  !/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
 export default function JoinConsent() {
   const { token } = useParams<{ token: string }>();
   const navigate = useNavigate();
@@ -95,20 +101,33 @@ export default function JoinConsent() {
 
         {/* Browser mode */}
         <button
-          onClick={() => navigate(`/browser-session/${token ?? ""}`)}
-          className="flex flex-col gap-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-blue-500 text-left px-5 py-4 rounded-xl transition-colors group"
+          onClick={() => supportsDisplayMedia && navigate(`/browser-session/${token ?? ""}`)}
+          disabled={!supportsDisplayMedia}
+          className={`flex flex-col gap-1.5 border text-left px-5 py-4 rounded-xl transition-colors group ${
+            supportsDisplayMedia
+              ? "bg-gray-800 hover:bg-gray-700 border-gray-700 hover:border-blue-500"
+              : "bg-gray-900 border-gray-800 opacity-50 cursor-not-allowed"
+          }`}
         >
           <div className="flex items-center gap-2">
             <span className="text-lg">🌐</span>
-            <span className="font-semibold text-white group-hover:text-blue-400 transition-colors">
+            <span className={`font-semibold transition-colors ${supportsDisplayMedia ? "text-white group-hover:text-blue-400" : "text-gray-500"}`}>
               Share from Browser
             </span>
-            <span className="ml-auto text-xs bg-green-900/50 text-green-400 border border-green-800 px-2 py-0.5 rounded-full">
-              No install
-            </span>
+            {supportsDisplayMedia ? (
+              <span className="ml-auto text-xs bg-green-900/50 text-green-400 border border-green-800 px-2 py-0.5 rounded-full">
+                No install
+              </span>
+            ) : (
+              <span className="ml-auto text-xs bg-gray-800 text-gray-500 border border-gray-700 px-2 py-0.5 rounded-full">
+                Desktop only
+              </span>
+            )}
           </div>
           <p className="text-sm text-gray-400 pl-7">
-            Share your screen directly from this browser tab. The other person can view your screen only.
+            {supportsDisplayMedia
+              ? "Share your screen directly from this browser tab. The other person can view your screen only."
+              : "Screen sharing from a browser is not supported on mobile devices."}
           </p>
         </button>
 
