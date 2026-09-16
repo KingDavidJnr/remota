@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Remota Desktop</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>tech.quickdesk.remota.desktop</string>
+
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+
+    <key>CFBundleExecutable</key>
+    <string>remota-desktop</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <!-- Screen recording permission prompt -->
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Remota Desktop needs to capture your screen so the other person can view it remotely.</string>
+
+    <!-- Accessibility / input injection permission prompt -->
+    <key>NSAccessibilityUsageDescription</key>
+    <string>Remota Desktop needs accessibility access to forward keyboard and mouse input from the remote controller.</string>
+
+    <!-- remota:// deep-link URI scheme -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>Remota Session</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>remota</string>
+            </array>
+        </dict>
+    </array>
+
+    <!-- Minimum macOS version (ScreenCaptureKit requires 13.0) -->
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+</dict>
+</plist>
