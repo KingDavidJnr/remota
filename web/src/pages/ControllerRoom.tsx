@@ -23,6 +23,7 @@ export default function ControllerRoom() {
   const [copied, setCopied] = useState(false);
   const [showKeyboard, setShowKeyboard] = useState(false);
   const [needsTap, setNeedsTap] = useState(false); // autoplay blocked fallback
+  const [viewOnly, setViewOnly] = useState(false); // true when participant is in browser mode
 
   const joinUrl = `${window.location.origin}/join/${token ?? ""}`;
 
@@ -79,6 +80,7 @@ export default function ControllerRoom() {
 
       const dc = pc.createDataChannel("control");
       dcRef.current = dc;
+      dc.onopen = () => setViewOnly(false);
 
       pc.ontrack = (e) => {
         if (videoRef.current && e.streams[0]) {
@@ -86,6 +88,13 @@ export default function ControllerRoom() {
           // Attempt autoplay; show tap-to-start if blocked
           videoRef.current.play().catch(() => setNeedsTap(true));
           setStatus("connected");
+          // If DataChannel hasn't opened 3s after track arrives,
+          // participant is in browser mode — mark view-only
+          setTimeout(() => {
+            if (dcRef.current?.readyState !== "open") {
+              setViewOnly(true);
+            }
+          }, 3000);
         }
       };
 
@@ -414,22 +423,31 @@ export default function ControllerRoom() {
       <div className="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800">
         <span className="font-semibold">Remota</span>
         <div className="flex items-center gap-3">
-          <span className="flex items-center gap-2 text-sm text-green-400">
-            <span className="w-2 h-2 bg-green-400 rounded-full inline-block animate-pulse" />
-            Connected
-          </span>
-          {/* Keyboard toggle — shown on touch devices */}
-          <button
-            onClick={toggleKeyboard}
-            className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
-              showKeyboard
-                ? "bg-blue-600 text-white"
-                : "bg-gray-800 text-gray-300 hover:bg-gray-700"
-            }`}
-            aria-label="Toggle keyboard"
-          >
-            ⌨
-          </button>
+          {viewOnly ? (
+            <span className="flex items-center gap-2 text-sm text-blue-400">
+              <span className="w-2 h-2 bg-blue-400 rounded-full inline-block animate-pulse" />
+              View only
+            </span>
+          ) : (
+            <span className="flex items-center gap-2 text-sm text-green-400">
+              <span className="w-2 h-2 bg-green-400 rounded-full inline-block animate-pulse" />
+              Connected
+            </span>
+          )}
+          {/* Keyboard toggle — only shown in full control mode */}
+          {!viewOnly && (
+            <button
+              onClick={toggleKeyboard}
+              className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                showKeyboard
+                  ? "bg-blue-600 text-white"
+                  : "bg-gray-800 text-gray-300 hover:bg-gray-700"
+              }`}
+              aria-label="Toggle keyboard"
+            >
+              ⌨
+            </button>
+          )}
           <button
             onClick={handleTerminate}
             className="bg-red-600 hover:bg-red-500 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition-colors"
@@ -447,17 +465,17 @@ export default function ControllerRoom() {
           playsInline
           muted
           className="w-full h-full object-contain select-none touch-none"
-          style={{ cursor: "none" }}
-          onPointerMove={handlePointerMove}
-          onPointerDown={handlePointerDown}
-          onPointerUp={handlePointerUp}
-          onDoubleClick={handleDoubleClick}
-          onWheel={handleWheel}
+          style={{ cursor: viewOnly ? "default" : "none" }}
+          onPointerMove={viewOnly ? undefined : handlePointerMove}
+          onPointerDown={viewOnly ? undefined : handlePointerDown}
+          onPointerUp={viewOnly ? undefined : handlePointerUp}
+          onDoubleClick={viewOnly ? undefined : handleDoubleClick}
+          onWheel={viewOnly ? undefined : handleWheel}
           onContextMenu={(e) => e.preventDefault()}
-          onTouchStart={handleTouchStart}
-          onTouchMove={handleTouchMove}
-          onTouchEnd={handleTouchEnd}
-          onTouchCancel={handleTouchEnd}
+          onTouchStart={viewOnly ? undefined : handleTouchStart}
+          onTouchMove={viewOnly ? undefined : handleTouchMove}
+          onTouchEnd={viewOnly ? undefined : handleTouchEnd}
+          onTouchCancel={viewOnly ? undefined : handleTouchEnd}
         />
 
         {/* Tap-to-start overlay (shown when autoplay is blocked) */}
