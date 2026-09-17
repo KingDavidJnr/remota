@@ -135,10 +135,12 @@ export default function ControllerRoom() {
       dc.onopen = () => setViewOnly(false);
 
       // Receive screen (video) and participant mic (audio)
+      // Both recvonly — mic sending added lazily when user clicks the mic button
       pc.addTransceiver("video", { direction: "recvonly" });
-      pc.addTransceiver("audio", { direction: "sendrecv" });
+      pc.addTransceiver("audio", { direction: "recvonly" });
 
       pc.ontrack = (e) => {
+        log(`ontrack: ${e.track.kind} state=${e.track.readyState}`);
         if (e.track.kind === "video") {
           const v = videoRef.current;
           if (v) {
