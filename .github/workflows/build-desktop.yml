@@ -40,19 +40,27 @@ jobs:
           $vcpkg = $env:VCPKG_INSTALLATION_ROOT
           Write-Output "vcpkg: $vcpkg"
 
-          # Install libvpx static for x64-windows
-          & "$vcpkg\vcpkg.exe" install "libvpx:x64-windows-static" --triplet x64-windows-static
+          # Install libvpx static
+          & "$vcpkg\vcpkg.exe" install "libvpx:x64-windows-static"
 
-          $libDir    = "$vcpkg\installed\x64-windows-static\lib"
+          $libDir     = "$vcpkg\installed\x64-windows-static\lib"
           $includeDir = "$vcpkg\installed\x64-windows-static\include"
 
-          Write-Output "lib dir: $libDir"
-          Write-Output "include dir: $includeDir"
           Write-Output "lib dir contents:"
           Get-ChildItem $libDir | Where-Object { $_.Name -like "*vpx*" }
 
-          # env-libvpx-sys needs these; force 1.13.0 since that is the
-          # newest version with a pre-generated bindings file in the crate
+          # vcpkg installs vpx.lib but env-libvpx-sys links libvpx.lib on Windows.
+          # Create a copy with the expected name.
+          $vpxLib = Join-Path $libDir "vpx.lib"
+          $libvpxLib = Join-Path $libDir "libvpx.lib"
+          if ((Test-Path $vpxLib) -and -not (Test-Path $libvpxLib)) {
+            Write-Output "Copying vpx.lib -> libvpx.lib"
+            Copy-Item $vpxLib $libvpxLib
+          }
+
+          Write-Output "lib dir after copy:"
+          Get-ChildItem $libDir | Where-Object { $_.Name -like "*vpx*" }
+
           $env:VPX_LIB_DIR     = $libDir
           $env:VPX_INCLUDE_DIR = $includeDir
           $env:VPX_STATIC      = "1"
