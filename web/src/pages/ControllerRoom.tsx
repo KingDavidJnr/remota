@@ -133,11 +133,10 @@ export default function ControllerRoom() {
       dcRef.current = dc;
       dc.onopen = () => setViewOnly(false);
 
-      // Receive screen (video) and participant mic (audio).
-      // Use sendrecv for audio so the controller can later add a mic track
-      // without requiring renegotiation — the transceiver slot already exists.
+      // Receive screen (video) and participant mic (audio)
+      // Both recvonly — mic sending added lazily when user clicks the mic button
       pc.addTransceiver("video", { direction: "recvonly" });
-      pc.addTransceiver("audio", { direction: "sendrecv" });
+      pc.addTransceiver("audio", { direction: "recvonly" });
 
       pc.ontrack = (e) => {
         log(`ontrack: ${e.track.kind} state=${e.track.readyState}`);
@@ -164,40 +163,17 @@ export default function ControllerRoom() {
             const a = audioRef.current;
             if (a) {
               a.srcObject = new MediaStream([e.track]);
-              // Start muted so autoplay is allowed by the browser, then
-              // immediately try to unmute. If unmuted play fails (no gesture
-              // yet), register a one-shot listener to unmute on first tap/click.
-              a.muted = true;
+              a.muted = false;
               a.volume = 1;
-              a.play()
-                .then(() => {
-                  // Autoplay succeeded (muted). Now try unmuting.
-                  a.muted = false;
-                  // On some browsers unmuting after play throws; re-play unmuted.
-                  a.play().catch(() => {
-                    // Unmuted play blocked — wait for user gesture
-                    a.muted = true;
-                    const unlock = () => {
-                      a.muted = false;
-                      a.play().catch(() => {});
-                      document.removeEventListener("click", unlock);
-                      document.removeEventListener("touchend", unlock);
-                    };
-                    document.addEventListener("click", unlock, { once: true });
-                    document.addEventListener("touchend", unlock, { once: true });
-                  });
-                })
-                .catch(() => {
-                  // Even muted autoplay failed — wait for gesture
-                  const unlock = () => {
-                    a.muted = false;
-                    a.play().catch(() => {});
-                    document.removeEventListener("click", unlock);
-                    document.removeEventListener("touchend", unlock);
-                  };
-                  document.addEventListener("click", unlock, { once: true });
-                  document.addEventListener("touchend", unlock, { once: true });
-                });
+              a.play().catch(() => {
+                const unlock = () => {
+                  a.play().catch(() => {});
+                  document.removeEventListener("click", unlock);
+                  document.removeEventListener("touchend", unlock);
+                };
+                document.addEventListener("click", unlock, { once: true });
+                document.addEventListener("touchend", unlock, { once: true });
+              });
             }
           }, 100);
         }
@@ -297,21 +273,11 @@ export default function ControllerRoom() {
         });
         const track = micStream.getAudioTracks()[0];
         if (track && pcRef.current) {
-          // Replace the null track on the existing sendrecv audio transceiver
-          // so no renegotiation is needed.
-          const audioTransceiver = pcRef.current.getTransceivers().find(
-            (t) => t.mid !== null && t.receiver.track?.kind === "audio"
-          );
-          if (audioTransceiver?.sender) {
-            await audioTransceiver.sender.replaceTrack(track);
-          } else {
-            // Fallback: add track directly (will require renegotiation on some browsers)
-            pcRef.current.addTrack(track, micStream);
-          }
-          track.enabled = true; // start unmuted since user explicitly clicked
+          track.enabled = false; // start muted
+          pcRef.current.addTrack(track, micStream);
           micTrackRef.current = track;
           setHasMic(true);
-          setMicMuted(false);
+          setMicMuted(true);
         }
       } catch { /* denied */ }
       return;

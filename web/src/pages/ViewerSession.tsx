@@ -19,13 +19,13 @@ export default function ViewerSession() {
   const sigRef = useRef<SignalingClient | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
 
   const [status, setStatus] = useState<Status>("connecting");
   const [showConfirm, setShowConfirm] = useState(false);
   const [micMuted, setMicMuted] = useState(false);
   const [hasMic, setHasMic] = useState(false);
+  const [needsTap, setNeedsTap] = useState(false);
 
   useEffect(() => {
     if (!token) return;
@@ -66,50 +66,21 @@ export default function ViewerSession() {
           }
 
           pc.ontrack = (e) => {
-            if (e.track.kind === "video") {
-              const v = videoRef.current;
-              if (!v) return;
-              v.srcObject = new MediaStream([e.track]);
-              // Video element stays muted — audio is played via a separate element.
-              // Muted video autoplay is always allowed by browsers.
-              v.play().catch(() => {});
-              setStatus("active");
-            }
-
-            if (e.track.kind === "audio") {
-              const a = audioRef.current;
-              if (!a) return;
-              a.srcObject = new MediaStream([e.track]);
-              // Start muted so autoplay succeeds, then unmute immediately.
-              a.muted = true;
-              a.volume = 1;
-              a.play()
-                .then(() => {
-                  a.muted = false;
-                  a.play().catch(() => {
-                    // Unmuted play blocked — wait for gesture
-                    a.muted = true;
-                    const unlock = () => {
-                      a.muted = false;
-                      a.play().catch(() => {});
-                      document.removeEventListener("click", unlock);
-                      document.removeEventListener("touchend", unlock);
-                    };
-                    document.addEventListener("click", unlock, { once: true });
-                    document.addEventListener("touchend", unlock, { once: true });
-                  });
-                })
-                .catch(() => {
-                  const unlock = () => {
-                    a.muted = false;
-                    a.play().catch(() => {});
-                    document.removeEventListener("click", unlock);
-                    document.removeEventListener("touchend", unlock);
-                  };
-                  document.addEventListener("click", unlock, { once: true });
-                  document.addEventListener("touchend", unlock, { once: true });
-                });
-            }
+            const stream = e.streams[0] ?? new MediaStream([e.track]);
+            const v = videoRef.current;
+            if (!v) return;
+            v.srcObject = null;
+            v.srcObject = stream;
+            v.load();
+            v.play()
+              .then(() => {
+                v.muted = false;
+                setStatus("active");
+              })
+              .catch(() => {
+                setNeedsTap(true);
+                setStatus("active");
+              });
           };
 
           pc.onicecandidate = (e) => {
@@ -235,20 +206,31 @@ export default function ViewerSession() {
           ref={videoRef}
           autoPlay
           playsInline
-          muted
+          muted={needsTap}
           className="w-full h-full object-contain bg-black"
-        />
-        <audio
-          ref={audioRef}
-          autoPlay
-          playsInline
-          style={{ position: "absolute", width: 0, height: 0, opacity: 0 }}
         />
 
         {status === "connecting" && (
           <div className="absolute inset-0 flex items-center justify-center bg-gray-950">
             <p className="text-gray-400">Waiting for stream…</p>
           </div>
+        )}
+
+        {needsTap && (
+          <button
+            className="fixed inset-0 z-40 flex flex-col items-center justify-center bg-gray-950 text-white gap-4"
+            onClick={() => {
+              videoRef.current?.play()
+                .then(() => {
+                  if (videoRef.current) videoRef.current.muted = false;
+                  setNeedsTap(false);
+                })
+                .catch(() => {});
+            }}
+          >
+            <span className="text-5xl">▶</span>
+            <span className="text-xl font-semibold">Tap to view screen</span>
+          </button>
         )}
       </div>
 

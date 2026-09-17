@@ -15,7 +15,6 @@ export default function BrowserSession() {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
 
   const [status, setStatus] = useState<Status>("requesting");
   const [error, setError] = useState<string | null>(null);
@@ -130,42 +129,6 @@ export default function BrowserSession() {
         pc.addTrack(track, stream);
       }
 
-      // Receive the controller's mic audio (if they unmute)
-      pc.ontrack = (e) => {
-        if (e.track.kind === "audio") {
-          const a = audioRef.current;
-          if (!a) return;
-          a.srcObject = new MediaStream([e.track]);
-          a.muted = true;
-          a.volume = 1;
-          a.play()
-            .then(() => {
-              a.muted = false;
-              a.play().catch(() => {
-                a.muted = true;
-                const unlock = () => {
-                  a.muted = false;
-                  a.play().catch(() => {});
-                  document.removeEventListener("click", unlock);
-                  document.removeEventListener("touchend", unlock);
-                };
-                document.addEventListener("click", unlock, { once: true });
-                document.addEventListener("touchend", unlock, { once: true });
-              });
-            })
-            .catch(() => {
-              const unlock = () => {
-                a.muted = false;
-                a.play().catch(() => {});
-                document.removeEventListener("click", unlock);
-                document.removeEventListener("touchend", unlock);
-              };
-              document.addEventListener("click", unlock, { once: true });
-              document.addEventListener("touchend", unlock, { once: true });
-            });
-        }
-      };
-
       pc.onicecandidate = (e) => {
         if (e.candidate) {
           sig.send({ type: "ice_candidate", candidate: e.candidate.toJSON() });
@@ -255,13 +218,6 @@ export default function BrowserSession() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center gap-8 px-4">
-      {/* Hidden audio element for receiving the controller's mic */}
-      <audio
-        ref={audioRef}
-        autoPlay
-        playsInline
-        style={{ position: "absolute", width: 0, height: 0, opacity: 0 }}
-      />
       <div className="flex flex-col items-center gap-2 text-center">
         <div className="flex items-center gap-2">
           <span className={`w-2.5 h-2.5 rounded-full inline-block animate-pulse ${
