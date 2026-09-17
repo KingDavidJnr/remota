@@ -24,6 +24,8 @@ type SignalType =
   | "viewer_joined"
   | "viewer_left"
   | "active"
+  | "ping"
+  | "pong"
   | "terminate"
   | "error";
 
@@ -117,7 +119,26 @@ export function terminateExpiredRooms(tokens: string[]) {
 export function createSignalingServer(httpServer: Server) {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
+  // Server-side heartbeat — terminate connections that stop responding
+  const heartbeat = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      const client = ws as WebSocket & { isAlive?: boolean };
+      if (client.isAlive === false) {
+        client.terminate();
+        return;
+      }
+      client.isAlive = false;
+      client.ping();
+    });
+  }, 30_000);
+
+  wss.on("close", () => clearInterval(heartbeat));
+
   wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
+    const client = ws as WebSocket & { isAlive?: boolean };
+    client.isAlive = true;
+    ws.on("pong", () => { client.isAlive = true; });
+
     const clientId = nextClientId();
     let assignedToken: string | null = null;
 
@@ -128,6 +149,12 @@ export function createSignalingServer(httpServer: Server) {
         msg = JSON.parse(raw.toString()) as SignalMessage;
       } catch {
         send(ws, { type: "error", message: "Invalid JSON" });
+        return;
+      }
+
+      // ── ping/pong keepalive ────────────────────────────────────────────────
+      if (msg.type === "ping") {
+        send(ws, { type: "pong" });
         return;
       }
 
