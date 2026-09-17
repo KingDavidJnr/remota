@@ -360,13 +360,27 @@ export function createSignalingServer(httpServer: Server) {
       }
 
       if (leaving?.role === "participant") {
-        const controller = getClientByRole(token, "controller");
-        if (controller) {
-          send(controller.ws, { type: "participant_left" });
-        }
-        await terminateRoom(token);
+        // Give the participant 15 seconds to reconnect before terminating.
+        // This handles tab switches, brief network drops, and mobile backgrounding.
+        setTimeout(async () => {
+          // Check if participant has reconnected
+          const stillGone = !getClientByRole(token, "participant");
+          if (stillGone) {
+            const controller = getClientByRole(token, "controller");
+            if (controller) {
+              send(controller.ws, { type: "participant_left" });
+            }
+            await terminateRoom(token);
+          }
+        }, 15_000);
       } else if (leaving?.role === "controller") {
-        await terminateRoom(token);
+        // Give controller 15 seconds to reconnect too
+        setTimeout(async () => {
+          const stillGone = !getClientByRole(token, "controller");
+          if (stillGone) {
+            await terminateRoom(token);
+          }
+        }, 15_000);
       }
     });
 
