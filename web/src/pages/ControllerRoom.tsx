@@ -29,13 +29,10 @@ export default function ControllerRoom() {
   const [showKeyboard, setShowKeyboard] = useState(false);
   const [viewOnly, setViewOnly] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
-  const [micMuted, setMicMuted] = useState(true); // always start muted
+  const [micMuted, setMicMuted] = useState(true);
   const [hasMic, setHasMic] = useState(false);
-  const [debugLog, setDebugLog] = useState<string[]>([]);
 
-  function log(msg: string) {
-    setDebugLog((p) => [...p.slice(-8), `${new Date().toLocaleTimeString()}: ${msg}`]);
-  }
+  function log(_msg: string) {}
 
   const joinUrl = `${window.location.origin}/join/${token ?? ""}`;
 
@@ -659,11 +656,6 @@ export default function ControllerRoom() {
         />
       )}
 
-      {debugLog.length > 0 && (
-        <div className="fixed bottom-0 left-0 right-0 z-50 bg-black/90 text-green-400 text-xs font-mono p-2 pointer-events-none">
-          {debugLog.map((l, i) => <div key={i}>{l}</div>)}
-        </div>
-      )}
     </>
   );
 }
