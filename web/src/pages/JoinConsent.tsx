@@ -150,6 +150,25 @@ export default function JoinConsent() {
           </p>
         </button>
 
+        {/* Viewer mode */}
+        <button
+          onClick={() => navigate(`/viewer-session/${token ?? ""}`)}
+          className="flex flex-col gap-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-purple-500 text-left px-5 py-4 rounded-xl transition-colors group"
+        >
+          <div className="flex items-center gap-2">
+            <span className="text-lg">👁️</span>
+            <span className="font-semibold text-white group-hover:text-purple-400 transition-colors">
+              Join as Viewer
+            </span>
+            <span className="ml-auto text-xs bg-purple-900/50 text-purple-400 border border-purple-800 px-2 py-0.5 rounded-full">
+              Watch only
+            </span>
+          </div>
+          <p className="text-sm text-gray-400 pl-7">
+            Watch and listen to the shared screen without sharing your own. Mic optional.
+          </p>
+        </button>
+
         <button
           onClick={handleDecline}
           className="text-gray-500 hover:text-gray-400 text-sm text-center transition-colors"
