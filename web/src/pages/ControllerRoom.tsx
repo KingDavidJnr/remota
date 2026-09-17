@@ -165,18 +165,19 @@ export default function ControllerRoom() {
         log(`ontrack: ${e.track.kind} streams=${e.streams.length}`);
         const stream = e.streams[0] ?? new MediaStream([e.track]);
 
-        // Re-attach on every track event to handle renegotiation
+        // Always start muted so autoplay never fails — unmute on tap or after play succeeds
         const attachStream = () => {
           const v = videoRef.current;
           if (!v) return;
-          // Null then re-assign forces the decoder to reinitialise on mobile
           v.srcObject = null;
           v.srcObject = stream;
+          v.muted = true;
           v.load();
           v.play()
             .then(() => {
               log("video playing");
-              v.muted = false; // unmute now that autoplay succeeded
+              v.muted = false;
+              setNeedsTap(false);
             })
             .catch((err) => {
               log(`autoplay blocked: ${err}`);
@@ -211,11 +212,8 @@ export default function ControllerRoom() {
 
       pc.onconnectionstatechange = () => {
         log(`conn: ${pc.connectionState}`);
-        if (
-          pc.connectionState === "failed" ||
-          pc.connectionState === "disconnected" ||
-          pc.connectionState === "closed"
-        ) {
+        // Only terminate on hard failure — disconnected is transient on mobile networks
+        if (pc.connectionState === "failed") {
           cleanup();
           navigate("/");
         }
@@ -664,7 +662,7 @@ export default function ControllerRoom() {
           ref={videoRef}
           autoPlay
           playsInline
-          muted={needsTap} // muted until user gesture unlocks audio
+          muted
           className="w-full h-full object-contain select-none touch-none bg-black"
           style={{ cursor: viewOnly ? "default" : "none" }}
           onPointerMove={viewOnly ? undefined : handlePointerMove}
@@ -684,12 +682,16 @@ export default function ControllerRoom() {
           <button
             className="fixed inset-0 z-40 flex flex-col items-center justify-center bg-gray-950 text-white gap-4"
             onClick={() => {
-              videoRef.current?.play()
-                .then(() => {
-                  setNeedsTap(false);
-                  if (videoRef.current) videoRef.current.muted = false;
-                })
-                .catch(() => {}); // still blocked — keep overlay
+              const v = videoRef.current;
+              if (!v) return;
+              v.muted = false;
+              v.play()
+                .then(() => setNeedsTap(false))
+                .catch(() => {
+                  // If still failing with audio, try muted
+                  v.muted = true;
+                  v.play().then(() => setNeedsTap(false)).catch(() => {});
+                });
             }}
           >
             <span className="text-5xl">▶</span>

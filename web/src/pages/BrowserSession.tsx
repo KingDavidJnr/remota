@@ -93,7 +93,15 @@ export default function BrowserSession() {
         return;
       }
 
-      stream.getVideoTracks()[0]?.addEventListener("ended", () => cleanup());
+      // Only stop when the video track truly ends — not on mobile background/tab switch.
+      // We check 2 seconds later if the track is still ended before cleaning up.
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
+        setTimeout(() => {
+          if (streamRef.current?.getVideoTracks()[0]?.readyState === "ended") {
+            cleanup();
+          }
+        }, 2000);
+      });
 
       // Step 3 — request mic audio (optional — user can deny)
       try {
@@ -129,11 +137,8 @@ export default function BrowserSession() {
           setStatus("active");
           sig.send({ type: "active" });
         }
-        if (
-          pc!.connectionState === "failed" ||
-          pc!.connectionState === "disconnected" ||
-          pc!.connectionState === "closed"
-        ) {
+        // Only terminate on hard failure — disconnected is transient on mobile
+        if (pc!.connectionState === "failed") {
           cleanup();
         }
       };
