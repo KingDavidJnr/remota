@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: # allow manual trigger from GitHub Actions UI
+  workflow_dispatch:
 
 jobs:
   build-windows:
@@ -30,11 +30,43 @@ jobs:
           key: windows-cargo-${{ hashFiles('desktop/Cargo.lock') }}
           restore-keys: windows-cargo-
 
-      - name: Install libvpx via vcpkg
+      - name: Install libvpx 1.13.0 via vcpkg
         run: |
-          vcpkg install libvpx:x64-windows-static
-          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
-          echo "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static\lib" >> $env:GITHUB_PATH
+          # vcpkg is pre-installed on windows-latest runners
+          # Override the version to 1.13.0 to match env-libvpx-sys pre-generated FFI
+          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
+          Write-Output "vcpkg root: $vcpkg"
+          
+          # Install libvpx static
+          & "$vcpkg\vcpkg.exe" install "libvpx:x64-windows-static"
+          
+          $libDir = "$vcpkg\installed\x64-windows-static\lib"
+          $includeDir = "$vcpkg\installed\x64-windows-static\include"
+          
+          # Get the actual installed version
+          $version = & "$vcpkg\vcpkg.exe" list libvpx 2>&1 | Select-String "libvpx" | ForEach-Object { ($_ -split '\s+')[1] } | Select-Object -First 1
+          Write-Output "Installed libvpx version: $version"
+          
+          echo "VPX_LIB_DIR=$libDir" >> $env:GITHUB_ENV
+          echo "VPX_INCLUDE_DIR=$includeDir" >> $env:GITHUB_ENV
+          echo "VPX_STATIC=1" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Detect libvpx version for FFI
+        run: |
+          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
+          $raw = & "$vcpkg\vcpkg.exe" list 2>&1 | Select-String "libvpx:x64-windows-static"
+          Write-Output "vcpkg list output: $raw"
+          # Extract version like 1.14.0 → try 1.13.0 fallback if not in pre-gen list
+          $ver = if ($raw -match '(\d+\.\d+\.\d+)') { $Matches[1] } else { "1.13.0" }
+          # env-libvpx-sys only has pre-gen up to 1.13.0 — use that if vcpkg installs newer
+          $supported = @("1.13.0","1.12.0","1.11.0","1.10.0","1.9.0","1.8.2","1.8.1","1.8.0","1.7.0")
+          if ($ver -notin $supported) {
+            Write-Output "vcpkg installed $ver which has no pre-gen FFI, forcing VPX_VERSION=1.13.0"
+            $ver = "1.13.0"
+          }
+          Write-Output "Using VPX_VERSION=$ver"
+          echo "VPX_VERSION=$ver" >> $env:GITHUB_ENV
         shell: pwsh
 
       - name: Build release binary
@@ -43,12 +75,12 @@ jobs:
           REMOTA_TURN_URL: turn:turn.remota.quickdesk.tech:3478
           REMOTA_TURN_USER: ${{ secrets.REMOTA_TURN_USER }}
           REMOTA_TURN_PASS: ${{ secrets.REMOTA_TURN_PASS }}
-          VCPKGRS_DYNAMIC: 0
-          VPX_STATIC: 1
-          VPX_VERSION: 1.14.0
-          VPX_LIB_DIR: ${{ env.VCPKG_ROOT }}\installed\x64-windows-static\lib
-          VPX_INCLUDE_DIR: ${{ env.VCPKG_ROOT }}\installed\x64-windows-static\include
-        run: cargo build --release --manifest-path desktop/Cargo.toml --target x86_64-pc-windows-msvc
+        run: |
+          Write-Output "VPX_LIB_DIR=$env:VPX_LIB_DIR"
+          Write-Output "VPX_INCLUDE_DIR=$env:VPX_INCLUDE_DIR"
+          Write-Output "VPX_VERSION=$env:VPX_VERSION"
+          Write-Output "VPX_STATIC=$env:VPX_STATIC"
+          cargo build --release --manifest-path desktop/Cargo.toml --target x86_64-pc-windows-msvc
         shell: pwsh
 
       - name: Rename binary

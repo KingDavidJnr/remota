@@ -34,10 +34,7 @@ use webrtc::{
         track_local_static_sample::TrackLocalStaticSample, TrackLocal,
     },
 };
-use vpx::{
-    codec::VpxCodec,
-    encoder::{Encoder, EncoderConfig, EncoderFlags},
-};
+use vpx_encode::{Codec, Config, Encoder, Error as VpxError};
 
 use crate::capture::CapturedFrame;
 use crate::config;
@@ -211,7 +208,7 @@ impl Session {
 // BGRA → I420 (YUV planar) → VP8 bitstream → WebRTC Sample
 
 const TARGET_FPS: u32 = 30;
-const TARGET_BITRATE_KBPS: u32 = 2000; // 2 Mbps — adjust as needed
+const TARGET_BITRATE_KBPS: u32 = 2000;
 
 pub async fn run_encoding_loop(
     track: Arc<TrackLocalStaticSample>,
@@ -219,9 +216,9 @@ pub async fn run_encoding_loop(
 ) {
     info!("[encode] encoding loop started ({TARGET_FPS} fps, {TARGET_BITRATE_KBPS} kbps)");
 
-    // Encoder is initialised on the first frame so we know the dimensions.
     let mut encoder: Option<Encoder> = None;
-    let mut frame_idx: u64 = 0;
+    let mut last_w: u32 = 0;
+    let mut last_h: u32 = 0;
     let frame_duration = Duration::from_millis(1000 / TARGET_FPS as u64);
 
     while let Some(frame) = frame_rx.recv().await {
@@ -229,38 +226,31 @@ pub async fn run_encoding_loop(
         let h = frame.height;
 
         // (Re-)initialise encoder if first frame or dimensions changed
-        let enc = match encoder {
-            Some(ref mut e) if e.config().width == w && e.config().height == h => e,
-            _ => {
-                match build_encoder(w, h) {
-                    Ok(e) => {
-                        info!("[encode] VP8 encoder initialised ({w}×{h})");
-                        encoder = Some(e);
-                        encoder.as_mut().unwrap()
-                    }
-                    Err(e) => {
-                        error!("[encode] failed to build encoder: {e}");
-                        continue;
-                    }
+        if encoder.is_none() || w != last_w || h != last_h {
+            match build_encoder(w, h) {
+                Ok(e) => {
+                    info!("[encode] VP8 encoder initialised ({w}x{h})");
+                    encoder = Some(e);
+                    last_w = w;
+                    last_h = h;
+                }
+                Err(e) => {
+                    error!("[encode] failed to build encoder: {e}");
+                    continue;
                 }
             }
-        };
+        }
+
+        let enc = encoder.as_mut().unwrap();
 
         // Convert BGRA → I420
         let i420 = bgra_to_i420(&frame.data, w, h);
 
-        // Encode
-        let pts = frame_idx as i64;
-        let flags = if frame_idx % (TARGET_FPS as u64 * 2) == 0 {
-            EncoderFlags::FORCE_KF // keyframe every 2 seconds
-        } else {
-            EncoderFlags::empty()
-        };
-
-        match enc.encode(pts, &i420, w, h, frame_duration, flags) {
+        // Encode — vpx-encode takes &[u8] I420 data
+        match enc.encode(i420.as_slice()) {
             Ok(packets) => {
                 for pkt in packets {
-                    let data = Bytes::copy_from_slice(&pkt.data);
+                    let data = Bytes::copy_from_slice(pkt.data);
                     if data.is_empty() {
                         continue;
                     }
@@ -276,25 +266,23 @@ pub async fn run_encoding_loop(
                 }
             }
             Err(e) => {
-                warn!("[encode] encode error: {e}");
+                warn!("[encode] encode error: {e:?}");
             }
         }
-
-        frame_idx += 1;
     }
 
     info!("[encode] encoding loop exited");
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn build_encoder(width: u32, height: u32) -> Result<Encoder> {
-    let mut cfg = EncoderConfig::new(width, height)?;
-    cfg.set_bitrate(TARGET_BITRATE_KBPS)?;
-    cfg.set_timebase(1, TARGET_FPS)?;
-    cfg.set_threads(num_cpus_available() as u32)?;
-    Encoder::new(VpxCodec::VP8, cfg, EncoderFlags::empty())
-        .context("create VP8 encoder")
+fn build_encoder(width: u32, height: u32) -> Result<Encoder, VpxError> {
+    let cfg = Config {
+        width,
+        height,
+        timebase: [1, TARGET_FPS as i32],
+        bitrate: TARGET_BITRATE_KBPS,
+        codec: Codec::VP8,
+    };
+    Encoder::new(cfg)
 }
 
 fn num_cpus_available() -> usize {
