@@ -152,11 +152,24 @@ export default function ControllerRoom() {
           }, 3000);
         }
         if (e.track.kind === "audio") {
-          const a = audioRef.current;
-          if (a) {
-            a.srcObject = new MediaStream([e.track]);
-            a.play().catch(() => {});
-          }
+          setTimeout(() => {
+            const a = audioRef.current;
+            if (a) {
+              a.srcObject = new MediaStream([e.track]);
+              a.muted = false;
+              a.volume = 1;
+              a.play().catch(() => {
+                // Autoplay blocked — retry on next user interaction
+                const unlock = () => {
+                  a.play().catch(() => {});
+                  document.removeEventListener("click", unlock);
+                  document.removeEventListener("touchend", unlock);
+                };
+                document.addEventListener("click", unlock, { once: true });
+                document.addEventListener("touchend", unlock, { once: true });
+              });
+            }
+          }, 100);
         }
       };
 
@@ -626,7 +639,7 @@ export default function ControllerRoom() {
               ref={audioRef}
               autoPlay
               playsInline
-              className="hidden"
+              style={{ position: "absolute", width: 0, height: 0, opacity: 0 }}
             />
           </div>
 

@@ -101,13 +101,16 @@ export default function BrowserSession() {
       });
 
       // Step 3 — request mic audio (optional — user can deny)
+      // Mic starts muted by default — user must click the mic button to unmute
       try {
         const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         const micTrack = micStream.getAudioTracks()[0];
         if (micTrack) {
+          micTrack.enabled = false; // start muted
           stream.addTrack(micTrack);
           micTrackRef.current = micTrack;
           setHasMic(true);
+          setMicMuted(true);
         }
       } catch {
         // Mic denied or unavailable — continue without audio
