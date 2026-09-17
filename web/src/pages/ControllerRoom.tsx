@@ -29,11 +29,12 @@ export default function ControllerRoom() {
   const [showKeyboard, setShowKeyboard] = useState(false);
   const [viewOnly, setViewOnly] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
-  const [micMuted, setMicMuted] = useState(false);
+  const [micMuted, setMicMuted] = useState(true); // always start muted
   const [hasMic, setHasMic] = useState(false);
+  const [debugLog, setDebugLog] = useState<string[]>([]);
 
-  function log(_msg: string) {
-    // debug logging removed after fix confirmed
+  function log(msg: string) {
+    setDebugLog((p) => [...p.slice(-8), `${new Date().toLocaleTimeString()}: ${msg}`]);
   }
 
   const joinUrl = `${window.location.origin}/join/${token ?? ""}`;
@@ -246,31 +247,27 @@ export default function ControllerRoom() {
   }, [token, navigate]);
 
   // ── Mic toggle ────────────────────────────────────────────────────────────
-  async function handleMicToggle() {
-    // First click — lazily request mic and add to existing PC
+  const handleMicToggle = async () => {
     if (!micTrackRef.current) {
       try {
         const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         const track = micStream.getAudioTracks()[0];
         if (track && pcRef.current) {
-          track.enabled = true;
+          track.enabled = false; // start muted
           pcRef.current.addTrack(track, micStream);
           micTrackRef.current = track;
           setHasMic(true);
-          setMicMuted(false);
+          setMicMuted(true);
         }
-      } catch {
-        // Mic denied — ignore
-      }
+      } catch { /* denied */ }
       return;
     }
-    // Subsequent clicks — toggle mute
     const track = micTrackRef.current;
     track.enabled = !track.enabled;
     setMicMuted(!track.enabled);
-  }
+  };
 
-  // ── Control message sender ────────────────────────────────────────────────
+  // -- Control message sender ────────────────────────────────────────────────
   const sendControl = useCallback((msg: object) => {
     const dc = dcRef.current;
     if (dc?.readyState === "open") {
@@ -521,15 +518,15 @@ export default function ControllerRoom() {
     setTimeout(() => setCopied(false), 2000);
   }
 
-  // ── Waiting / connecting ──────────────────────────────────────────────────
-  if (status === "waiting" || status === "connecting") {
-    return (
-      <>
+  const isWaiting = status === "waiting" || status === "connecting";
+
+  return (
+    <>
+      {isWaiting ? (
         <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center gap-8 px-4">
           <h2 className="text-2xl font-semibold">
-            {status === "waiting" ? "Waiting for participant…" : "Connecting…"}
+            {status === "waiting" ? "Waiting for participant..." : "Connecting..."}
           </h2>
-
           <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 flex flex-col gap-4 w-full max-w-md">
             <p className="text-sm text-gray-400">Share this link with the participant:</p>
             <div className="flex items-center gap-2">
@@ -546,7 +543,6 @@ export default function ControllerRoom() {
               </button>
             </div>
           </div>
-
           <button
             onClick={handleTerminate}
             className="text-red-400 hover:text-red-300 text-sm transition-colors"
@@ -554,126 +550,103 @@ export default function ControllerRoom() {
             End Connection
           </button>
         </div>
+      ) : (
+        <div
+          className="min-h-screen bg-gray-950 text-white flex flex-col outline-none"
+          tabIndex={0}
+          onKeyDown={handleKeyDown}
+          onKeyUp={handleKeyUp}
+        >
+          <div className="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800">
+            <span className="font-semibold">Remota</span>
+            <div className="flex items-center gap-3">
+              {viewOnly ? (
+                <span className="flex items-center gap-2 text-sm text-blue-400">
+                  <span className="w-2 h-2 bg-blue-400 rounded-full inline-block animate-pulse" />
+                  View only
+                </span>
+              ) : (
+                <span className="flex items-center gap-2 text-sm text-green-400">
+                  <span className="w-2 h-2 bg-green-400 rounded-full inline-block animate-pulse" />
+                  Connected
+                </span>
+              )}
+              {!viewOnly && (
+                <button
+                  onClick={toggleKeyboard}
+                  className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                    showKeyboard ? "bg-blue-600 text-white" : "bg-gray-800 text-gray-300 hover:bg-gray-700"
+                  }`}
+                  aria-label="Toggle keyboard"
+                >
+                  Keyboard
+                </button>
+              )}
+              <button
+                onClick={handleMicToggle}
+                className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                  !hasMic
+                    ? "bg-gray-800 text-gray-500 hover:bg-gray-700"
+                    : micMuted
+                    ? "bg-red-900/60 text-red-400 hover:bg-red-900"
+                    : "bg-gray-800 text-gray-300 hover:bg-gray-700"
+                }`}
+              >
+                {micMuted ? "Mic Off" : "Mic On"}
+              </button>
+              <button
+                onClick={handleTerminate}
+                className="bg-red-600 hover:bg-red-500 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition-colors"
+              >
+                End
+              </button>
+            </div>
+          </div>
 
-        {showConfirm && (
-          <ConfirmDialog
-            message="Are you sure you want to end this connection?"
-            confirmLabel="End Connection"
-            onConfirm={confirmTerminate}
-            onCancel={() => setShowConfirm(false)}
+          <div className="flex-1 relative flex items-center justify-center bg-black">
+            <video
+              ref={(el) => { videoRef.current = el; }}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-contain select-none touch-none bg-black"
+              style={{ cursor: viewOnly ? "default" : "none" }}
+              onPointerMove={viewOnly ? undefined : handlePointerMove}
+              onPointerDown={viewOnly ? undefined : handlePointerDown}
+              onPointerUp={viewOnly ? undefined : handlePointerUp}
+              onDoubleClick={viewOnly ? undefined : handleDoubleClick}
+              onWheel={viewOnly ? undefined : handleWheel}
+              onContextMenu={(e) => e.preventDefault()}
+              onTouchStart={viewOnly ? undefined : handleTouchStart}
+              onTouchMove={viewOnly ? undefined : handleTouchMove}
+              onTouchEnd={viewOnly ? undefined : handleTouchEnd}
+              onTouchCancel={viewOnly ? undefined : handleTouchEnd}
+            />
+            <audio
+              ref={(el) => { audioRef.current = el; }}
+              autoPlay
+              playsInline
+              className="hidden"
+            />
+          </div>
+
+          <input
+            ref={keyInputRef}
+            type="text"
+            inputMode="text"
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            className="absolute opacity-0 w-0 h-0 pointer-events-none"
+            aria-hidden="true"
+            onInput={handleSoftInput}
+            onKeyDown={handleSoftKeyDown}
+            onBlur={() => setShowKeyboard(false)}
           />
-        )}
-      </>
-    );
-  }
-
-  // ── Connected ─────────────────────────────────────────────────────────────
-  return (
-    <div
-      className="min-h-screen bg-gray-950 text-white flex flex-col outline-none"
-      tabIndex={0}
-      onKeyDown={handleKeyDown}
-      onKeyUp={handleKeyUp}
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800">
-        <span className="font-semibold">Remota</span>
-        <div className="flex items-center gap-3">
-          {viewOnly ? (
-            <span className="flex items-center gap-2 text-sm text-blue-400">
-              <span className="w-2 h-2 bg-blue-400 rounded-full inline-block animate-pulse" />
-              View only
-            </span>
-          ) : (
-            <span className="flex items-center gap-2 text-sm text-green-400">
-              <span className="w-2 h-2 bg-green-400 rounded-full inline-block animate-pulse" />
-              Connected
-            </span>
-          )}
-          {/* Keyboard toggle — only shown in full control mode */}
-          {!viewOnly && (
-            <button
-              onClick={toggleKeyboard}
-              className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
-                showKeyboard
-                  ? "bg-blue-600 text-white"
-                  : "bg-gray-800 text-gray-300 hover:bg-gray-700"
-              }`}
-              aria-label="Toggle keyboard"
-            >
-              ⌨
-            </button>
-          )}
-          {/* Mic toggle — always visible, first click enables mic */}
-          <button
-            onClick={handleMicToggle}
-            className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
-              !hasMic
-                ? "bg-gray-800 text-gray-500 hover:bg-gray-700"
-                : micMuted
-                ? "bg-red-900/60 text-red-400 hover:bg-red-900"
-                : "bg-gray-800 text-gray-300 hover:bg-gray-700"
-            }`}
-            aria-label={!hasMic ? "Enable mic" : micMuted ? "Unmute mic" : "Mute mic"}
-          >
-            {!hasMic ? "🎙️" : micMuted ? "🔇" : "🎙️"}
-          </button>
-          <button
-            onClick={handleTerminate}
-            className="bg-red-600 hover:bg-red-500 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition-colors"
-          >
-            End
-          </button>
         </div>
-      </div>
+      )}
 
-      {/* Remote screen — video only, always muted. Audio is on the separate <audio> element. */}
-      <div className="flex-1 relative flex items-center justify-center bg-black">
-        <video
-          ref={(el) => { videoRef.current = el; }}
-          autoPlay
-          playsInline
-          muted
-          className="w-full h-full object-contain select-none touch-none bg-black"
-          style={{ cursor: viewOnly ? "default" : "none" }}
-          onPointerMove={viewOnly ? undefined : handlePointerMove}
-          onPointerDown={viewOnly ? undefined : handlePointerDown}
-          onPointerUp={viewOnly ? undefined : handlePointerUp}
-          onDoubleClick={viewOnly ? undefined : handleDoubleClick}
-          onWheel={viewOnly ? undefined : handleWheel}
-          onContextMenu={(e) => e.preventDefault()}
-          onTouchStart={viewOnly ? undefined : handleTouchStart}
-          onTouchMove={viewOnly ? undefined : handleTouchMove}
-          onTouchEnd={viewOnly ? undefined : handleTouchEnd}
-          onTouchCancel={viewOnly ? undefined : handleTouchEnd}
-        />
-
-        {/* Hidden audio element for remote audio — separate from video avoids autoplay block */}
-        <audio
-          ref={(el) => { audioRef.current = el; }}
-          autoPlay
-          playsInline
-          className="hidden"
-        />
-      </div>
-
-      {/* Soft keyboard input (hidden, focused when keyboard toggle is on) */}
-      <input
-        ref={keyInputRef}
-        type="text"
-        inputMode="text"
-        autoComplete="off"
-        autoCorrect="off"
-        autoCapitalize="off"
-        spellCheck={false}
-        className="absolute opacity-0 w-0 h-0 pointer-events-none"
-        aria-hidden="true"
-        onInput={handleSoftInput}
-        onKeyDown={handleSoftKeyDown}
-        onBlur={() => setShowKeyboard(false)}
-      />
-
-      {/* End connection confirmation */}
       {showConfirm && (
         <ConfirmDialog
           message="Are you sure you want to end this connection? The session will be terminated for both parties."
@@ -682,6 +655,12 @@ export default function ControllerRoom() {
           onCancel={() => setShowConfirm(false)}
         />
       )}
-    </div>
+
+      {debugLog.length > 0 && (
+        <div className="fixed bottom-0 left-0 right-0 z-50 bg-black/90 text-green-400 text-xs font-mono p-2 pointer-events-none">
+          {debugLog.map((l, i) => <div key={i}>{l}</div>)}
+        </div>
+      )}
+    </>
   );
 }
