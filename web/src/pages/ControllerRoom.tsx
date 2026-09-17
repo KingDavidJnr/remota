@@ -206,10 +206,18 @@ export default function ControllerRoom() {
 
       pc.onconnectionstatechange = () => {
         log(`conn: ${pc.connectionState}`);
-        // Only terminate on hard failure — disconnected is transient on mobile networks
+        if (pc.connectionState === "connected") {
+          setStatus("connected");
+        }
+        // On failure during an active session, show reconnecting state.
+        // Only navigate away if we were never connected (setup failure).
         if (pc.connectionState === "failed") {
-          cleanup();
-          navigate("/");
+          if (status === "connected") {
+            setStatus("connecting"); // show reconnecting UI
+          } else {
+            cleanup();
+            navigate("/");
+          }
         }
       };
 
@@ -652,10 +660,16 @@ export default function ControllerRoom() {
       {/* Remote screen */}
       <div className="flex-1 relative flex items-center justify-center bg-black">
         <video
-          ref={videoRef}
+          ref={(el) => {
+            // Set muted imperatively — never let React control this attribute.
+            // React resets muted on re-render which breaks mobile autoplay.
+            if (el) {
+              el.muted = true; // start muted; attachStream() unmutes after play
+              (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
+            }
+          }}
           autoPlay
           playsInline
-          muted
           className="w-full h-full object-contain select-none touch-none bg-black"
           style={{ cursor: viewOnly ? "default" : "none" }}
           onPointerMove={viewOnly ? undefined : handlePointerMove}
