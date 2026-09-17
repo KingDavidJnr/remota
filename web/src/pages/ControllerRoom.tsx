@@ -126,6 +126,16 @@ export default function ControllerRoom() {
     }
 
     async function startOffer() {
+      // Capture controller mic BEFORE creating the PC so the track
+      // is ready to add and the permission prompt doesn't interrupt negotiation
+      let micTrack: MediaStreamTrack | null = null;
+      try {
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        micTrack = micStream.getAudioTracks()[0] ?? null;
+      } catch {
+        // Mic denied — continue without
+      }
+
       pc = new RTCPeerConnection({ iceServers: buildIceServers() });
       pcRef.current = pc;
 
@@ -133,65 +143,59 @@ export default function ControllerRoom() {
       dcRef.current = dc;
       dc.onopen = () => setViewOnly(false);
 
-      // Capture controller mic (optional — continue without if denied)
-      try {
-        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        const micTrack = micStream.getAudioTracks()[0];
-        if (micTrack) {
-          pc.addTrack(micTrack, micStream);
-          micTrackRef.current = micTrack;
-          setHasMic(true);
-        }
-      } catch {
-        // Mic denied — continue without
+      if (micTrack) {
+        const micStream = new MediaStream([micTrack]);
+        pc.addTrack(micTrack, micStream);
+        micTrackRef.current = micTrack;
+        setHasMic(true);
       }
 
-      // video: recvonly (we only receive the screen)
-      // audio: sendrecv (we send mic, receive participant mic)
+      // video: recvonly — we receive the screen
+      // audio: sendrecv if we have a mic, recvonly if we don't
       pc.addTransceiver("video", { direction: "recvonly" });
-      if (!micTrackRef.current) {
-        // No mic track added — still negotiate audio recvonly to hear participant
+      if (!micTrack) {
         pc.addTransceiver("audio", { direction: "recvonly" });
       }
 
-      pc.ontrack = (e) => {
-        log(`ontrack: ${e.track.kind} streams=${e.streams.length}`);
-        const stream = e.streams[0] ?? new MediaStream([e.track]);
+      // Collect all incoming tracks into one stream, attach once connection is stable
+      const remoteStream = new MediaStream();
 
-        // Split video and audio into separate elements.
-        // <video> gets only video tracks — always muted, autoplay never blocked.
-        // <audio> gets only audio tracks — starts muted, unmuted immediately after play.
-        const attachStream = () => {
+      pc.ontrack = (e) => {
+        log(`ontrack: ${e.track.kind}`);
+        remoteStream.addTrack(e.track);
+
+        // Attach whenever a video track arrives — video shows immediately
+        if (e.track.kind === "video") {
           const v = videoRef.current;
           if (v) {
-            const videoOnly = new MediaStream(stream.getVideoTracks());
-            v.srcObject = videoOnly;
+            v.srcObject = remoteStream;
             v.muted = true;
             v.play().catch(() => {});
           }
+          setStatus("connected");
+          setTimeout(() => {
+            if (dcRef.current?.readyState !== "open") setViewOnly(true);
+          }, 3000);
+        }
 
+        // When audio track arrives, update the audio element
+        if (e.track.kind === "audio") {
           const a = audioRef.current;
           if (a) {
-            const audioOnly = new MediaStream(stream.getAudioTracks());
+            const audioOnly = new MediaStream([e.track]);
             a.srcObject = audioOnly;
             a.muted = false;
             a.play().catch(() => {
-              // Audio autoplay blocked — unmute on next user interaction
-              const unlock = () => { a.play().catch(() => {}); document.removeEventListener("click", unlock); document.removeEventListener("touchend", unlock); };
+              const unlock = () => {
+                a.play().catch(() => {});
+                document.removeEventListener("click", unlock);
+                document.removeEventListener("touchend", unlock);
+              };
               document.addEventListener("click", unlock, { once: true });
               document.addEventListener("touchend", unlock, { once: true });
             });
           }
-        };
-
-        attachStream();
-        setStatus("connected");
-
-        setTimeout(() => {
-          if (dcRef.current?.readyState !== "open") {
-            setViewOnly(true);
-          }
-        }, 3000);
+        }
       };
 
       pc.onicecandidate = (e) => {
