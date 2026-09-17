@@ -126,16 +126,6 @@ export default function ControllerRoom() {
     }
 
     async function startOffer() {
-      // Capture controller mic BEFORE creating the PC so the track
-      // is ready to add and the permission prompt doesn't interrupt negotiation
-      let micTrack: MediaStreamTrack | null = null;
-      try {
-        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        micTrack = micStream.getAudioTracks()[0] ?? null;
-      } catch {
-        // Mic denied — continue without
-      }
-
       pc = new RTCPeerConnection({ iceServers: buildIceServers() });
       pcRef.current = pc;
 
@@ -143,32 +133,15 @@ export default function ControllerRoom() {
       dcRef.current = dc;
       dc.onopen = () => setViewOnly(false);
 
-      if (micTrack) {
-        const micStream = new MediaStream([micTrack]);
-        pc.addTrack(micTrack, micStream);
-        micTrackRef.current = micTrack;
-        setHasMic(true);
-      }
-
-      // video: recvonly — we receive the screen
-      // audio: sendrecv if we have a mic, recvonly if we don't
+      // Receive screen (video) and participant mic (audio)
       pc.addTransceiver("video", { direction: "recvonly" });
-      if (!micTrack) {
-        pc.addTransceiver("audio", { direction: "recvonly" });
-      }
-
-      // Collect all incoming tracks into one stream, attach once connection is stable
-      const remoteStream = new MediaStream();
+      pc.addTransceiver("audio", { direction: "sendrecv" });
 
       pc.ontrack = (e) => {
-        log(`ontrack: ${e.track.kind}`);
-        remoteStream.addTrack(e.track);
-
-        // Attach whenever a video track arrives — video shows immediately
         if (e.track.kind === "video") {
           const v = videoRef.current;
           if (v) {
-            v.srcObject = remoteStream;
+            v.srcObject = new MediaStream([e.track]);
             v.muted = true;
             v.play().catch(() => {});
           }
@@ -177,23 +150,11 @@ export default function ControllerRoom() {
             if (dcRef.current?.readyState !== "open") setViewOnly(true);
           }, 3000);
         }
-
-        // When audio track arrives, update the audio element
         if (e.track.kind === "audio") {
           const a = audioRef.current;
           if (a) {
-            const audioOnly = new MediaStream([e.track]);
-            a.srcObject = audioOnly;
-            a.muted = false;
-            a.play().catch(() => {
-              const unlock = () => {
-                a.play().catch(() => {});
-                document.removeEventListener("click", unlock);
-                document.removeEventListener("touchend", unlock);
-              };
-              document.addEventListener("click", unlock, { once: true });
-              document.addEventListener("touchend", unlock, { once: true });
-            });
+            a.srcObject = new MediaStream([e.track]);
+            a.play().catch(() => {});
           }
         }
       };
@@ -205,24 +166,16 @@ export default function ControllerRoom() {
       };
 
       pc.onconnectionstatechange = () => {
-        log(`conn: ${pc.connectionState}`);
-        if (pc.connectionState === "connected") {
-          setStatus("connected");
+        const state = pc.connectionState;
+        log(`conn: ${state}`);
+        if (state === "connected") setStatus("connected");
+        if (state === "failed") {
+          // Check pcRef status to avoid stale closure
+          const currentStatus = pcRef.current === pc ? "check" : "gone";
+          if (currentStatus === "gone") return;
+          cleanup();
+          navigate("/");
         }
-        // On failure during an active session, show reconnecting state.
-        // Only navigate away if we were never connected (setup failure).
-        if (pc.connectionState === "failed") {
-          if (status === "connected") {
-            setStatus("connecting"); // show reconnecting UI
-          } else {
-            cleanup();
-            navigate("/");
-          }
-        }
-      };
-
-      pc.oniceconnectionstatechange = () => {
-        log(`ICE: ${pc.iceConnectionState}`);
       };
 
       const offer = await pc.createOffer();
@@ -293,9 +246,26 @@ export default function ControllerRoom() {
   }, [token, navigate]);
 
   // ── Mic toggle ────────────────────────────────────────────────────────────
-  function handleMicToggle() {
+  async function handleMicToggle() {
+    // First click — lazily request mic and add to existing PC
+    if (!micTrackRef.current) {
+      try {
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const track = micStream.getAudioTracks()[0];
+        if (track && pcRef.current) {
+          track.enabled = true;
+          pcRef.current.addTrack(track, micStream);
+          micTrackRef.current = track;
+          setHasMic(true);
+          setMicMuted(false);
+        }
+      } catch {
+        // Mic denied — ignore
+      }
+      return;
+    }
+    // Subsequent clicks — toggle mute
     const track = micTrackRef.current;
-    if (!track) return;
     track.enabled = !track.enabled;
     setMicMuted(!track.enabled);
   }
@@ -634,20 +604,20 @@ export default function ControllerRoom() {
               ⌨
             </button>
           )}
-          {/* Mic toggle */}
-          {hasMic && (
-            <button
-              onClick={handleMicToggle}
-              className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
-                micMuted
-                  ? "bg-red-900/60 text-red-400 hover:bg-red-900"
-                  : "bg-gray-800 text-gray-300 hover:bg-gray-700"
-              }`}
-              aria-label={micMuted ? "Unmute mic" : "Mute mic"}
-            >
-              {micMuted ? "🔇" : "🎙️"}
-            </button>
-          )}
+          {/* Mic toggle — always visible, first click enables mic */}
+          <button
+            onClick={handleMicToggle}
+            className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
+              !hasMic
+                ? "bg-gray-800 text-gray-500 hover:bg-gray-700"
+                : micMuted
+                ? "bg-red-900/60 text-red-400 hover:bg-red-900"
+                : "bg-gray-800 text-gray-300 hover:bg-gray-700"
+            }`}
+            aria-label={!hasMic ? "Enable mic" : micMuted ? "Unmute mic" : "Mute mic"}
+          >
+            {!hasMic ? "🎙️" : micMuted ? "🔇" : "🎙️"}
+          </button>
           <button
             onClick={handleTerminate}
             className="bg-red-600 hover:bg-red-500 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition-colors"
