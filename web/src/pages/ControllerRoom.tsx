@@ -65,12 +65,6 @@ export default function ControllerRoom() {
       // Save session so refresh can offer to resume
       saveSession({ token: token!, role: "controller", path: `/wait/${token}` });
 
-      // Warn on refresh/close while session is active
-      const beforeUnload = (e: BeforeUnloadEvent) => {
-        e.preventDefault();
-      };
-      window.addEventListener("beforeunload", beforeUnload);
-
       sig.onMessage(async (msg) => {
         if (msg.type === "participant_joined") {
           log("participant joined");
@@ -279,7 +273,6 @@ export default function ControllerRoom() {
 
     function cleanup() {
       clearSession();
-      window.removeEventListener("beforeunload", () => {});
       micTrackRef.current?.stop();
       micTrackRef.current = null;
       // Close all viewer PCs

@@ -35,9 +35,6 @@ export default function ViewerSession() {
 
     saveSession({ token: token!, role: "participant-browser", path: `/viewer-session/${token}` });
 
-    const beforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); };
-    window.addEventListener("beforeunload", beforeUnload);
-
     async function start() {
       await sig.connect();
 
@@ -129,7 +126,6 @@ export default function ViewerSession() {
     void start();
 
     return () => {
-      window.removeEventListener("beforeunload", beforeUnload);
       cleanup();
     };
 

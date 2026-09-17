@@ -23,33 +23,26 @@ export default function ParticipantSession() {
     const sig = new SignalingClient();
     sigRef.current = sig;
 
-    // Save session for refresh recovery
     saveSession({ token, role: "participant-desktop", path: `/session/${token}` });
-
-    const beforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); };
-    window.addEventListener("beforeunload", beforeUnload);
 
     async function watch() {
       await sig.connect();
 
       sig.onMessage((msg) => {
         if (msg.type === "active") setStatus("active");
-        if (msg.type === "terminate" || msg.type === "participant_left") {
+        // Only end on explicit terminate from either party
+        if (msg.type === "terminate") {
           clearSession();
           setStatus("ended");
           setTimeout(() => navigate("/"), 2000);
         }
       });
-
-      sig.onClose(() => {
-        setStatus("ended");
-      });
+      // Do NOT end session on WS close — navigation and tab switches close it
     }
 
     void watch();
 
     return () => {
-      window.removeEventListener("beforeunload", beforeUnload);
       sig.close();
     };
   }, [token, navigate]);
