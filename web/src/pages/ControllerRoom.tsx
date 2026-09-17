@@ -18,16 +18,15 @@ export default function ControllerRoom() {
   const sigRef = useRef<SignalingClient | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const keyInputRef = useRef<HTMLInputElement>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
-  // Map of viewerId → RTCPeerConnection for each connected viewer
   const viewerPCsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
 
   const [status, setStatus] = useState<"waiting" | "connecting" | "connected" | "ended">("waiting");
   const [copied, setCopied] = useState(false);
   const [showKeyboard, setShowKeyboard] = useState(false);
-  const [needsTap, setNeedsTap] = useState(false);
   const [viewOnly, setViewOnly] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [micMuted, setMicMuted] = useState(false);
@@ -159,37 +158,34 @@ export default function ControllerRoom() {
         log(`ontrack: ${e.track.kind} streams=${e.streams.length}`);
         const stream = e.streams[0] ?? new MediaStream([e.track]);
 
-        // Always start muted so autoplay never fails — unmute on tap or after play succeeds
+        // Split video and audio into separate elements.
+        // <video> gets only video tracks — always muted, autoplay never blocked.
+        // <audio> gets only audio tracks — starts muted, unmuted immediately after play.
         const attachStream = () => {
           const v = videoRef.current;
-          if (!v) return;
-          v.srcObject = null;
-          v.srcObject = stream;
-          v.muted = true;
-          v.load();
-          v.play()
-            .then(() => {
-              log("video playing");
-              v.muted = false;
-              setNeedsTap(false);
-            })
-            .catch((err) => {
-              log(`autoplay blocked: ${err}`);
-              setNeedsTap(true);
+          if (v) {
+            const videoOnly = new MediaStream(stream.getVideoTracks());
+            v.srcObject = videoOnly;
+            v.muted = true;
+            v.play().catch(() => {});
+          }
+
+          const a = audioRef.current;
+          if (a) {
+            const audioOnly = new MediaStream(stream.getAudioTracks());
+            a.srcObject = audioOnly;
+            a.muted = false;
+            a.play().catch(() => {
+              // Audio autoplay blocked — unmute on next user interaction
+              const unlock = () => { a.play().catch(() => {}); document.removeEventListener("click", unlock); document.removeEventListener("touchend", unlock); };
+              document.addEventListener("click", unlock, { once: true });
+              document.addEventListener("touchend", unlock, { once: true });
             });
+          }
         };
 
         attachStream();
         setStatus("connected");
-
-        // Re-attach once more after a short delay — fixes black frame on
-        // some mobile Chrome versions where the decoder initialises late
-        setTimeout(() => {
-          if (videoRef.current?.readyState === 0) {
-            log("re-attaching stream (readyState=0)");
-            attachStream();
-          }
-        }, 1000);
 
         setTimeout(() => {
           if (dcRef.current?.readyState !== "open") {
@@ -657,19 +653,13 @@ export default function ControllerRoom() {
         </div>
       </div>
 
-      {/* Remote screen */}
+      {/* Remote screen — video only, always muted. Audio is on the separate <audio> element. */}
       <div className="flex-1 relative flex items-center justify-center bg-black">
         <video
-          ref={(el) => {
-            // Set muted imperatively — never let React control this attribute.
-            // React resets muted on re-render which breaks mobile autoplay.
-            if (el) {
-              el.muted = true; // start muted; attachStream() unmutes after play
-              (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
-            }
-          }}
+          ref={(el) => { videoRef.current = el; }}
           autoPlay
           playsInline
+          muted
           className="w-full h-full object-contain select-none touch-none bg-black"
           style={{ cursor: viewOnly ? "default" : "none" }}
           onPointerMove={viewOnly ? undefined : handlePointerMove}
@@ -684,28 +674,13 @@ export default function ControllerRoom() {
           onTouchCancel={viewOnly ? undefined : handleTouchEnd}
         />
 
-        {/* Tap-to-start overlay — fixed fullscreen so it's always visible on mobile */}
-        {needsTap && (
-          <button
-            className="fixed inset-0 z-40 flex flex-col items-center justify-center bg-gray-950 text-white gap-4"
-            onClick={() => {
-              const v = videoRef.current;
-              if (!v) return;
-              v.muted = false;
-              v.play()
-                .then(() => setNeedsTap(false))
-                .catch(() => {
-                  // If still failing with audio, try muted
-                  v.muted = true;
-                  v.play().then(() => setNeedsTap(false)).catch(() => {});
-                });
-            }}
-          >
-            <span className="text-5xl">▶</span>
-            <span className="text-xl font-semibold">Tap to view screen</span>
-            <span className="text-sm text-gray-400">Tap anywhere to start the remote stream</span>
-          </button>
-        )}
+        {/* Hidden audio element for remote audio — separate from video avoids autoplay block */}
+        <audio
+          ref={(el) => { audioRef.current = el; }}
+          autoPlay
+          playsInline
+          className="hidden"
+        />
       </div>
 
       {/* Soft keyboard input (hidden, focused when keyboard toggle is on) */}
