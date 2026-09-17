@@ -23,6 +23,8 @@ export default function ControllerRoom() {
   const keyInputRef = useRef<HTMLInputElement>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
   const viewerPCsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  // Store all remote tracks so they can be re-broadcast to viewers
+  const remoteTracksRef = useRef<MediaStreamTrack[]>([]);
 
   const [status, setStatus] = useState<"waiting" | "connecting" | "connected" | "ended">("waiting");
   const [copied, setCopied] = useState(false);
@@ -138,6 +140,10 @@ export default function ControllerRoom() {
 
       pc.ontrack = (e) => {
         log(`ontrack: ${e.track.kind} state=${e.track.readyState}`);
+
+        // Store for viewer re-broadcast
+        remoteTracksRef.current.push(e.track);
+
         if (e.track.kind === "video") {
           setStatus("connected");
           setTimeout(() => {
@@ -151,6 +157,7 @@ export default function ControllerRoom() {
             if (dcRef.current?.readyState !== "open") setViewOnly(true);
           }, 3000);
         }
+
         if (e.track.kind === "audio") {
           setTimeout(() => {
             const a = audioRef.current;
@@ -159,7 +166,6 @@ export default function ControllerRoom() {
               a.muted = false;
               a.volume = 1;
               a.play().catch(() => {
-                // Autoplay blocked — retry on next user interaction
                 const unlock = () => {
                   a.play().catch(() => {});
                   document.removeEventListener("click", unlock);
@@ -205,15 +211,13 @@ export default function ControllerRoom() {
       const vpc = new RTCPeerConnection({ iceServers: buildIceServers() });
       viewerPCsRef.current.set(viewerId, vpc);
 
-      // Re-broadcast the participant's stream to the viewer
-      const participantStream = videoRef.current?.srcObject as MediaStream | null;
-      if (participantStream) {
-        for (const track of participantStream.getTracks()) {
-          vpc.addTrack(track, participantStream);
-        }
+      // Re-broadcast all remote tracks (video + audio) to the viewer
+      const remoteStream = new MediaStream(remoteTracksRef.current);
+      for (const track of remoteTracksRef.current) {
+        vpc.addTrack(track, remoteStream);
       }
 
-      // Also send our mic to the viewer
+      // Also send our mic to the viewer (if active and unmuted)
       if (micTrackRef.current) {
         const micStream = new MediaStream([micTrackRef.current]);
         vpc.addTrack(micTrackRef.current, micStream);
@@ -250,7 +254,7 @@ export default function ControllerRoom() {
       clearSession();
       micTrackRef.current?.stop();
       micTrackRef.current = null;
-      // Close all viewer PCs
+      remoteTracksRef.current = [];
       viewerPCsRef.current.forEach((vpc) => vpc.close());
       viewerPCsRef.current.clear();
       sig.close();
@@ -263,7 +267,10 @@ export default function ControllerRoom() {
   const handleMicToggle = async () => {
     if (!micTrackRef.current) {
       try {
-        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          video: false,
+        });
         const track = micStream.getAudioTracks()[0];
         if (track && pcRef.current) {
           track.enabled = false; // start muted
