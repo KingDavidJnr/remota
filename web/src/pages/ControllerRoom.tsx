@@ -21,6 +21,8 @@ export default function ControllerRoom() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const keyInputRef = useRef<HTMLInputElement>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
+  // Map of viewerId → RTCPeerConnection for each connected viewer
+  const viewerPCsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
 
   const [status, setStatus] = useState<"waiting" | "connecting" | "connected" | "ended">("waiting");
   const [copied, setCopied] = useState(false);
@@ -76,17 +78,52 @@ export default function ControllerRoom() {
           await startOffer();
         }
         if (msg.type === "answer") {
-          await pc.setRemoteDescription(
-            new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
-          );
+          const fromId = msg.fromId as string | undefined;
+          if (fromId) {
+            // Answer from a viewer
+            const vpc = viewerPCsRef.current.get(fromId);
+            if (vpc) {
+              await vpc.setRemoteDescription(
+                new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
+              );
+            }
+          } else {
+            // Answer from participant
+            await pc.setRemoteDescription(
+              new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
+            );
+          }
         }
         if (msg.type === "ice_candidate" && msg.candidate) {
-          await pc.addIceCandidate(
-            new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
-          );
+          const fromId = msg.fromId as string | undefined;
+          if (fromId) {
+            // ICE from a viewer
+            const vpc = viewerPCsRef.current.get(fromId);
+            if (vpc) {
+              await vpc.addIceCandidate(
+                new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
+              );
+            }
+          } else {
+            // ICE from participant
+            await pc.addIceCandidate(
+              new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
+            );
+          }
         }
         if (msg.type === "active") {
           setStatus("connected");
+        }
+        if (msg.type === "viewer_joined") {
+          const viewerId = msg.viewerId as string;
+          log(`viewer joined: ${viewerId}`);
+          await startViewerOffer(viewerId);
+        }
+        if (msg.type === "viewer_left") {
+          const viewerId = msg.viewerId as string;
+          const vpc = viewerPCsRef.current.get(viewerId);
+          vpc?.close();
+          viewerPCsRef.current.delete(viewerId);
         }
         if (msg.type === "terminate" || msg.type === "participant_left") {
           cleanup();
@@ -193,6 +230,52 @@ export default function ControllerRoom() {
       sig.send({ type: "offer", sdp: pc.localDescription });
     }
 
+    // ── Viewer offer ──────────────────────────────────────────────────────────
+    // When a viewer joins we create a separate PC just for them.
+    // They receive the same stream the participant is sending us (re-broadcast).
+    // We also send our mic to them.
+    async function startViewerOffer(viewerId: string) {
+      const vpc = new RTCPeerConnection({ iceServers: buildIceServers() });
+      viewerPCsRef.current.set(viewerId, vpc);
+
+      // Re-broadcast the participant's stream to the viewer
+      const participantStream = videoRef.current?.srcObject as MediaStream | null;
+      if (participantStream) {
+        for (const track of participantStream.getTracks()) {
+          vpc.addTrack(track, participantStream);
+        }
+      }
+
+      // Also send our mic to the viewer
+      if (micTrackRef.current) {
+        const micStream = new MediaStream([micTrackRef.current]);
+        vpc.addTrack(micTrackRef.current, micStream);
+      }
+
+      vpc.onicecandidate = (e) => {
+        if (e.candidate) {
+          sig.send({
+            type: "ice_candidate",
+            candidate: e.candidate.toJSON(),
+            targetId: viewerId,
+          });
+        }
+      };
+
+      vpc.onconnectionstatechange = () => {
+        if (
+          vpc.connectionState === "failed" ||
+          vpc.connectionState === "closed"
+        ) {
+          viewerPCsRef.current.delete(viewerId);
+        }
+      };
+
+      const offer = await vpc.createOffer();
+      await vpc.setLocalDescription(offer);
+      sig.send({ type: "offer", sdp: vpc.localDescription, viewerId });
+    }
+
     void start();
     return () => cleanup();
 
@@ -201,6 +284,9 @@ export default function ControllerRoom() {
       window.removeEventListener("beforeunload", () => {});
       micTrackRef.current?.stop();
       micTrackRef.current = null;
+      // Close all viewer PCs
+      viewerPCsRef.current.forEach((vpc) => vpc.close());
+      viewerPCsRef.current.clear();
       sig.close();
       pc?.close();
       setStatus("ended");
