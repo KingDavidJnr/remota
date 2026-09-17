@@ -18,8 +18,8 @@ export default function ControllerRoom() {
   const sigRef = useRef<SignalingClient | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
   const keyInputRef = useRef<HTMLInputElement>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
   const viewerPCsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -142,13 +142,14 @@ export default function ControllerRoom() {
       pc.ontrack = (e) => {
         log(`ontrack: ${e.track.kind} state=${e.track.readyState}`);
         if (e.track.kind === "video") {
-          const v = videoRef.current;
-          if (v) {
-            v.srcObject = new MediaStream([e.track]);
-            v.muted = true;
-            v.play().catch(() => {});
-          }
           setStatus("connected");
+          setTimeout(() => {
+            const v = videoRef.current;
+            if (v) {
+              v.srcObject = new MediaStream([e.track]);
+              v.play().catch(() => {});
+            }
+          }, 100);
           setTimeout(() => {
             if (dcRef.current?.readyState !== "open") setViewOnly(true);
           }, 3000);
@@ -607,7 +608,7 @@ export default function ControllerRoom() {
 
           <div className="flex-1 relative flex items-center justify-center bg-black">
             <video
-              ref={(el) => { videoRef.current = el; }}
+              ref={videoRef}
               autoPlay
               playsInline
               muted
@@ -625,7 +626,7 @@ export default function ControllerRoom() {
               onTouchCancel={viewOnly ? undefined : handleTouchEnd}
             />
             <audio
-              ref={(el) => { audioRef.current = el; }}
+              ref={audioRef}
               autoPlay
               playsInline
               className="hidden"
