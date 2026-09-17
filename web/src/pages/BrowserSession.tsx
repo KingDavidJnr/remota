@@ -64,6 +64,8 @@ export default function BrowserSession() {
       }
     }
 
+    const beforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+
     async function start() {
       // Step 1 — connect to signaling immediately and register handler
       // BEFORE showing the getDisplayMedia picker, so we never miss the offer
@@ -75,8 +77,7 @@ export default function BrowserSession() {
       // Save session for refresh recovery
       saveSession({ token: token!, role: "participant-browser", path: `/browser-session/${token}` });
 
-      // Warn on refresh while active
-      const beforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+      // Warn on refresh while session is active
       window.addEventListener("beforeunload", beforeUnload);
 
       // Step 2 — request screen capture (shows picker dialog)
@@ -151,6 +152,8 @@ export default function BrowserSession() {
 
     function cleanup() {
       clearSession();
+      // Remove beforeunload warning — session is over
+      window.removeEventListener("beforeunload", beforeUnload);
       streamRef.current?.getTracks().forEach((t) => t.stop());
       micTrackRef.current?.stop();
       micTrackRef.current = null;
