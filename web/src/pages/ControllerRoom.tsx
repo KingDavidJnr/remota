@@ -73,7 +73,6 @@ export default function ControllerRoom() {
         if (msg.type === "answer") {
           const fromId = msg.fromId as string | undefined;
           if (fromId) {
-            // Answer from a viewer
             const vpc = viewerPCsRef.current.get(fromId);
             if (vpc) {
               await vpc.setRemoteDescription(
@@ -81,8 +80,7 @@ export default function ControllerRoom() {
               );
             }
           } else {
-            // Answer from participant
-            await pc.setRemoteDescription(
+            await pcRef.current?.setRemoteDescription(
               new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
             );
           }
@@ -90,7 +88,6 @@ export default function ControllerRoom() {
         if (msg.type === "ice_candidate" && msg.candidate) {
           const fromId = msg.fromId as string | undefined;
           if (fromId) {
-            // ICE from a viewer
             const vpc = viewerPCsRef.current.get(fromId);
             if (vpc) {
               await vpc.addIceCandidate(
@@ -98,10 +95,11 @@ export default function ControllerRoom() {
               );
             }
           } else {
-            // ICE from participant
-            await pc.addIceCandidate(
-              new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
-            );
+            try {
+              await pcRef.current?.addIceCandidate(
+                new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
+              );
+            } catch { /* ignore stale candidates */ }
           }
         }
         if (msg.type === "active") {
@@ -118,7 +116,9 @@ export default function ControllerRoom() {
           vpc?.close();
           viewerPCsRef.current.delete(viewerId);
         }
-        if (msg.type === "terminate" || msg.type === "participant_left") {
+        // Only end on explicit terminate — participant_left is a transient WS drop,
+        // handled by the server's 15s grace period
+        if (msg.type === "terminate") {
           cleanup();
           navigate("/");
         }
