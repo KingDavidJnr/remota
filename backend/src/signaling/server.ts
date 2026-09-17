@@ -273,7 +273,14 @@ export function createSignalingServer(httpServer: Server) {
       if (msg.type === "answer") {
         const controller = getClientByRole(token, "controller");
         if (controller) {
-          send(controller.ws, { type: "answer", sdp: msg.sdp, fromId: clientId });
+          const senderRole = rooms.get(token)?.get(clientId)?.role;
+          // Only tag with fromId for viewer answers so the controller can route
+          // them to the correct viewer PC. Participant answers go untagged.
+          if (senderRole === "viewer") {
+            send(controller.ws, { type: "answer", sdp: msg.sdp, fromId: clientId });
+          } else {
+            send(controller.ws, { type: "answer", sdp: msg.sdp });
+          }
         }
         return;
       }
@@ -289,14 +296,23 @@ export function createSignalingServer(httpServer: Server) {
             send(target.ws, { type: "ice_candidate", candidate: msg.candidate });
           }
         } else {
-          // From viewer/participant — send to controller, tagging sender
+          // From viewer/participant — send to controller
           const controller = getClientByRole(token, "controller");
           if (controller) {
-            send(controller.ws, {
-              type: "ice_candidate",
-              candidate: msg.candidate,
-              fromId: clientId,
-            });
+            const senderRole = rooms.get(token)?.get(clientId)?.role;
+            // Only tag with fromId for viewer ICE so controller routes to correct viewer PC
+            if (senderRole === "viewer") {
+              send(controller.ws, {
+                type: "ice_candidate",
+                candidate: msg.candidate,
+                fromId: clientId,
+              });
+            } else {
+              send(controller.ws, {
+                type: "ice_candidate",
+                candidate: msg.candidate,
+              });
+            }
           }
         }
         return;
