@@ -210,67 +210,84 @@ impl Session {
 const TARGET_FPS: u32 = 30;
 const TARGET_BITRATE_KBPS: u32 = 2000;
 
+/// Spawns a dedicated OS thread for VP8 encoding (encoder is !Send so it cannot
+/// live in a tokio task across await points). The thread encodes frames and sends
+/// the compressed bytes to an async task via a channel which calls write_sample.
 pub async fn run_encoding_loop(
     track: Arc<TrackLocalStaticSample>,
     mut frame_rx: mpsc::Receiver<CapturedFrame>,
 ) {
     info!("[encode] encoding loop started ({TARGET_FPS} fps, {TARGET_BITRATE_KBPS} kbps)");
 
-    let mut encoder: Option<Encoder> = None;
-    let mut last_w: u32 = 0;
-    let mut last_h: u32 = 0;
-    let mut frame_idx: i64 = 0;
     let frame_duration = Duration::from_millis(1000 / TARGET_FPS as u64);
 
-    while let Some(frame) = frame_rx.recv().await {
-        let w = frame.width;
-        let h = frame.height;
+    // Channel: encoding thread → async write task
+    let (encoded_tx, mut encoded_rx) = mpsc::channel::<Bytes>(8);
 
-        // (Re-)initialise encoder if first frame or dimensions changed
-        if encoder.is_none() || w != last_w || h != last_h {
-            match build_encoder(w, h) {
-                Ok(e) => {
-                    info!("[encode] VP8 encoder initialised ({w}x{h})");
-                    encoder = Some(e);
-                    last_w = w;
-                    last_h = h;
-                }
-                Err(e) => {
-                    error!("[encode] failed to build encoder: {e}");
-                    continue;
-                }
-            }
-        }
+    // Encoding thread — owns the !Send Encoder entirely within one OS thread
+    std::thread::spawn(move || {
+        let mut encoder: Option<Encoder> = None;
+        let mut last_w: u32 = 0;
+        let mut last_h: u32 = 0;
+        let mut frame_idx: i64 = 0;
 
-        let enc = encoder.as_mut().unwrap();
+        // Drive the tokio receiver synchronously via blocking recv
+        // We use a std mpsc internally — bridge from tokio channel via blocking
+        while let Some(frame) = {
+            // Block the OS thread waiting for the next frame from the tokio channel
+            tokio::runtime::Handle::current().block_on(frame_rx.recv())
+        } {
+            let w = frame.width;
+            let h = frame.height;
 
-        // Convert BGRA → I420
-        let i420 = bgra_to_i420(&frame.data, w, h);
-
-        // Encode — vpx-encode takes &[u8] I420 data
-        match enc.encode(frame_idx as i64, i420.as_slice()) {
-            Ok(packets) => {
-                for pkt in packets {
-                    let data = Bytes::copy_from_slice(pkt.data);
-                    if data.is_empty() {
+            if encoder.is_none() || w != last_w || h != last_h {
+                match build_encoder(w, h) {
+                    Ok(e) => {
+                        info!("[encode] VP8 encoder initialised ({w}x{h})");
+                        encoder = Some(e);
+                        last_w = w;
+                        last_h = h;
+                    }
+                    Err(e) => {
+                        error!("[encode] failed to build encoder: {e}");
                         continue;
                     }
-                    let sample = Sample {
-                        data,
-                        duration: frame_duration,
-                        ..Default::default()
-                    };
-                    if let Err(e) = track.write_sample(&sample).await {
-                        info!("[encode] write_sample ended: {e}");
-                        return;
-                    }
                 }
             }
-            Err(e) => {
-                warn!("[encode] encode error: {e:?}");
+
+            let enc = encoder.as_mut().unwrap();
+            let i420 = bgra_to_i420(&frame.data, w, h);
+
+            match enc.encode(frame_idx, i420.as_slice()) {
+                Ok(packets) => {
+                    for pkt in packets {
+                        let data = Bytes::copy_from_slice(pkt.data);
+                        if !data.is_empty() {
+                            if encoded_tx.blocking_send(data).is_err() {
+                                return; // receiver dropped — stop encoding
+                            }
+                        }
+                    }
+                }
+                Err(e) => warn!("[encode] encode error: {e:?}"),
             }
+
+            frame_idx += 1;
         }
-        frame_idx += 1;
+        info!("[encode] encoding thread exited");
+    });
+
+    // Async write task — receives encoded bytes and writes to the WebRTC track
+    while let Some(data) = encoded_rx.recv().await {
+        let sample = Sample {
+            data,
+            duration: frame_duration,
+            ..Default::default()
+        };
+        if let Err(e) = track.write_sample(&sample).await {
+            info!("[encode] write_sample ended: {e}");
+            return;
+        }
     }
 
     info!("[encode] encoding loop exited");
