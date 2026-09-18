@@ -2,9 +2,9 @@
 // Connects to the backend WSS /ws endpoint and handles the Remota signaling
 // protocol on behalf of the Participant (desktop endpoint).
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};

@@ -34,7 +34,7 @@ use webrtc::{
         track_local_static_sample::TrackLocalStaticSample, TrackLocal,
     },
 };
-use vpx_encode::{Codec, Config, Encoder, Error as VpxError};
+use vpx_encode::{Config, Encoder, Error as VpxError, VideoCodecId};
 
 use crate::capture::CapturedFrame;
 use crate::config;
@@ -219,6 +219,7 @@ pub async fn run_encoding_loop(
     let mut encoder: Option<Encoder> = None;
     let mut last_w: u32 = 0;
     let mut last_h: u32 = 0;
+    let mut frame_idx: i64 = 0;
     let frame_duration = Duration::from_millis(1000 / TARGET_FPS as u64);
 
     while let Some(frame) = frame_rx.recv().await {
@@ -247,7 +248,7 @@ pub async fn run_encoding_loop(
         let i420 = bgra_to_i420(&frame.data, w, h);
 
         // Encode — vpx-encode takes &[u8] I420 data
-        match enc.encode(i420.as_slice()) {
+        match enc.encode(frame_idx as i64, i420.as_slice()) {
             Ok(packets) => {
                 for pkt in packets {
                     let data = Bytes::copy_from_slice(pkt.data);
@@ -269,6 +270,7 @@ pub async fn run_encoding_loop(
                 warn!("[encode] encode error: {e:?}");
             }
         }
+        frame_idx += 1;
     }
 
     info!("[encode] encoding loop exited");
@@ -280,7 +282,7 @@ fn build_encoder(width: u32, height: u32) -> Result<Encoder, VpxError> {
         height,
         timebase: [1, TARGET_FPS as i32],
         bitrate: TARGET_BITRATE_KBPS,
-        codec: Codec::VP8,
+        codec: VideoCodecId::VP8,
     };
     Encoder::new(cfg)
 }
