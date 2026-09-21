@@ -4,7 +4,6 @@ import ControllerRoom from "./pages/ControllerRoom";
 import JoinConsent from "./pages/JoinConsent";
 import ParticipantSession from "./pages/ParticipantSession";
 import BrowserSession from "./pages/BrowserSession";
-import ViewerSession from "./pages/ViewerSession";
 
 export default function App() {
   return (
@@ -15,7 +14,6 @@ export default function App() {
         <Route path="/join/:token" element={<JoinConsent />} />
         <Route path="/session/:token" element={<ParticipantSession />} />
         <Route path="/browser-session/:token" element={<BrowserSession />} />
-        <Route path="/viewer-session/:token" element={<ViewerSession />} />
       </Routes>
     </BrowserRouter>
   );

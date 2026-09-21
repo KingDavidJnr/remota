@@ -69,12 +69,15 @@ export default function BrowserSession() {
       // BEFORE showing the getDisplayMedia picker, so we never miss the offer
       await sig.connect();
       sig.onMessage(handleSignalMessage);
-      // Do NOT terminate on WebSocket close — tab switches, navigation, and
-      // brief network drops all close the WS. Only explicit terminate ends the session.
+      sig.onClose(() => cleanup());
       sig.send({ type: "join", token, role: "participant" });
 
       // Save session for refresh recovery
       saveSession({ token: token!, role: "participant-browser", path: `/browser-session/${token}` });
+
+      // Warn on refresh while active
+      const beforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+      window.addEventListener("beforeunload", beforeUnload);
 
       // Step 2 — request screen capture (shows picker dialog)
       let stream: MediaStream;
@@ -90,30 +93,16 @@ export default function BrowserSession() {
         return;
       }
 
-      // Only stop when the video track truly ends — not on mobile background/tab switch.
-      // We check 2 seconds later if the track is still ended before cleaning up.
-      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
-        setTimeout(() => {
-          if (streamRef.current?.getVideoTracks()[0]?.readyState === "ended") {
-            cleanup();
-          }
-        }, 2000);
-      });
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => cleanup());
 
       // Step 3 — request mic audio (optional — user can deny)
-      // Mic starts muted by default — user must click the mic button to unmute
       try {
-        const micStream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-          video: false,
-        });
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         const micTrack = micStream.getAudioTracks()[0];
         if (micTrack) {
-          micTrack.enabled = false; // start muted
           stream.addTrack(micTrack);
           micTrackRef.current = micTrack;
           setHasMic(true);
-          setMicMuted(true);
         }
       } catch {
         // Mic denied or unavailable — continue without audio
@@ -140,8 +129,11 @@ export default function BrowserSession() {
           setStatus("active");
           sig.send({ type: "active" });
         }
-        // Only terminate on hard failure — disconnected is transient on mobile
-        if (pc!.connectionState === "failed") {
+        if (
+          pc!.connectionState === "failed" ||
+          pc!.connectionState === "disconnected" ||
+          pc!.connectionState === "closed"
+        ) {
           cleanup();
         }
       };

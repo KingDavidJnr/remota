@@ -5,13 +5,12 @@ import prisma from "../lib/prisma";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Role = "controller" | "participant" | "viewer";
+type Role = "controller" | "participant";
 
 interface RoomClient {
   ws: WebSocket;
   role: Role;
   token: string;
-  clientId: string;
 }
 
 type SignalType =
@@ -21,11 +20,7 @@ type SignalType =
   | "ice_candidate"
   | "participant_joined"
   | "participant_left"
-  | "viewer_joined"
-  | "viewer_left"
   | "active"
-  | "ping"
-  | "pong"
   | "terminate"
   | "error";
 
@@ -36,6 +31,7 @@ interface SignalMessage {
 
 // ─── Room Registry ────────────────────────────────────────────────────────────
 
+// Map<roomToken, Map<clientId, RoomClient>>
 const rooms = new Map<string, Map<string, RoomClient>>();
 
 let _clientId = 0;
@@ -75,10 +71,6 @@ function getClientByRole(
   return undefined;
 }
 
-function getClientById(token: string, clientId: string): RoomClient | undefined {
-  return rooms.get(token)?.get(clientId);
-}
-
 // ─── Cleanup ──────────────────────────────────────────────────────────────────
 
 export async function terminateRoom(token: string, initiator?: WebSocket) {
@@ -102,6 +94,10 @@ export async function terminateRoom(token: string, initiator?: WebSocket) {
   }
 }
 
+/**
+ * Called by the expiry job to close WebSocket clients for rooms that have
+ * just been marked EXPIRED in the database.
+ */
 export function terminateExpiredRooms(tokens: string[]) {
   for (const token of tokens) {
     const room = rooms.get(token);
@@ -119,26 +115,7 @@ export function terminateExpiredRooms(tokens: string[]) {
 export function createSignalingServer(httpServer: Server) {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
-  // Server-side heartbeat — terminate connections that stop responding
-  const heartbeat = setInterval(() => {
-    wss.clients.forEach((ws) => {
-      const client = ws as WebSocket & { isAlive?: boolean };
-      if (client.isAlive === false) {
-        client.terminate();
-        return;
-      }
-      client.isAlive = false;
-      client.ping();
-    });
-  }, 30_000);
-
-  wss.on("close", () => clearInterval(heartbeat));
-
   wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
-    const client = ws as WebSocket & { isAlive?: boolean };
-    client.isAlive = true;
-    ws.on("pong", () => { client.isAlive = true; });
-
     const clientId = nextClientId();
     let assignedToken: string | null = null;
 
@@ -152,22 +129,17 @@ export function createSignalingServer(httpServer: Server) {
         return;
       }
 
-      // ── ping/pong keepalive ────────────────────────────────────────────────
-      if (msg.type === "ping") {
-        send(ws, { type: "pong" });
-        return;
-      }
-
       // ── join ───────────────────────────────────────────────────────────────
       if (msg.type === "join") {
         const token = msg.token as string;
         const role = msg.role as Role;
 
-        if (!token || !["controller", "participant", "viewer"].includes(role)) {
+        if (!token || !["controller", "participant"].includes(role)) {
           send(ws, { type: "error", message: "Invalid join payload" });
           return;
         }
 
+        // Validate room in DB
         let room;
         try {
           room = await prisma.room.findUnique({ where: { token } });
@@ -190,25 +162,24 @@ export function createSignalingServer(httpServer: Server) {
           return;
         }
 
-        // Controller and participant are unique; viewers are not
-        if (role === "controller" || role === "participant") {
-          const existing = getClientByRole(token, role);
-          if (existing) {
-            send(ws, {
-              type: "error",
-              message: `A ${role} is already connected`,
-            });
-            return;
-          }
+        // Prevent duplicate roles
+        const existing = getClientByRole(token, role);
+        if (existing) {
+          send(ws, {
+            type: "error",
+            message: `A ${role} is already connected`,
+          });
+          return;
         }
 
         // Register client
         if (!rooms.has(token)) {
           rooms.set(token, new Map());
         }
-        rooms.get(token)!.set(clientId, { ws, role, token, clientId });
+        rooms.get(token)!.set(clientId, { ws, role, token });
         assignedToken = token;
 
+        // Update room status when participant joins
         if (role === "participant") {
           try {
             await prisma.room.update({
@@ -217,6 +188,7 @@ export function createSignalingServer(httpServer: Server) {
             });
           } catch { /* non-fatal */ }
 
+          // Notify controller that participant joined
           const controller = getClientByRole(token, "controller");
           if (controller) {
             send(controller.ws, { type: "participant_joined" });
@@ -224,23 +196,17 @@ export function createSignalingServer(httpServer: Server) {
         }
 
         if (role === "controller") {
+          // Check if participant already present
           const participant = getClientByRole(token, "participant");
           if (participant) {
             send(ws, { type: "participant_joined" });
           }
         }
 
-        if (role === "viewer") {
-          // Notify controller so it can create an offer for this viewer
-          const controller = getClientByRole(token, "controller");
-          if (controller) {
-            send(controller.ws, { type: "viewer_joined", viewerId: clientId });
-          }
-        }
-
         return;
       }
 
+      // All further messages require the client to have joined
       if (!assignedToken) {
         send(ws, { type: "error", message: "Not joined to any room" });
         return;
@@ -248,77 +214,31 @@ export function createSignalingServer(httpServer: Server) {
 
       const token = assignedToken;
 
-      // ── offer ──────────────────────────────────────────────────────────────
-      // Controller may send an offer targeted at a specific viewer (viewerId)
-      // or the general participant
+      // ── offer (controller → participant) ───────────────────────────────────
       if (msg.type === "offer") {
-        const viewerId = msg.viewerId as string | undefined;
-        if (viewerId) {
-          // Directed offer to a specific viewer
-          const viewer = getClientById(token, viewerId);
-          if (viewer) {
-            send(viewer.ws, { type: "offer", sdp: msg.sdp });
-          }
-        } else {
-          // Offer to the participant
-          const participant = getClientByRole(token, "participant");
-          if (participant) {
-            send(participant.ws, { type: "offer", sdp: msg.sdp });
-          }
+        const participant = getClientByRole(token, "participant");
+        if (participant) {
+          send(participant.ws, { type: "offer", sdp: msg.sdp });
         }
         return;
       }
 
-      // ── answer ─────────────────────────────────────────────────────────────
+      // ── answer (participant → controller) ──────────────────────────────────
       if (msg.type === "answer") {
         const controller = getClientByRole(token, "controller");
         if (controller) {
-          const senderRole = rooms.get(token)?.get(clientId)?.role;
-          // Only tag with fromId for viewer answers so the controller can route
-          // them to the correct viewer PC. Participant answers go untagged.
-          if (senderRole === "viewer") {
-            send(controller.ws, { type: "answer", sdp: msg.sdp, fromId: clientId });
-          } else {
-            send(controller.ws, { type: "answer", sdp: msg.sdp });
-          }
+          send(controller.ws, { type: "answer", sdp: msg.sdp });
         }
         return;
       }
 
-      // ── ice_candidate ──────────────────────────────────────────────────────
-      // Viewers and participants send candidates; controller sends targeted ones
+      // ── ice_candidate (relayed to the other side) ──────────────────────────
       if (msg.type === "ice_candidate") {
-        const targetId = msg.targetId as string | undefined;
-        if (targetId) {
-          // Targeted candidate from controller to specific viewer/participant
-          const target = getClientById(token, targetId);
-          if (target) {
-            send(target.ws, { type: "ice_candidate", candidate: msg.candidate });
-          }
-        } else {
-          // From viewer/participant — send to controller
-          const controller = getClientByRole(token, "controller");
-          if (controller) {
-            const senderRole = rooms.get(token)?.get(clientId)?.role;
-            // Only tag with fromId for viewer ICE so controller routes to correct viewer PC
-            if (senderRole === "viewer") {
-              send(controller.ws, {
-                type: "ice_candidate",
-                candidate: msg.candidate,
-                fromId: clientId,
-              });
-            } else {
-              send(controller.ws, {
-                type: "ice_candidate",
-                candidate: msg.candidate,
-              });
-            }
-          }
-        }
+        broadcastToRoom(token, { type: "ice_candidate", candidate: msg.candidate }, ws);
         return;
       }
 
-      // ── active ─────────────────────────────────────────────────────────────
+      // ── active (participant desktop signals WebRTC is connected) ───────────
       if (msg.type === "active") {
         try {
           await prisma.room.update({
@@ -326,6 +246,7 @@ export function createSignalingServer(httpServer: Server) {
             data: { status: "ACTIVE" },
           });
         } catch { /* non-fatal */ }
+        // Forward to controller so it can update its UI state if needed
         const controller = getClientByRole(token, "controller");
         if (controller) {
           send(controller.ws, { type: "active" });
@@ -350,37 +271,16 @@ export function createSignalingServer(httpServer: Server) {
       const leaving = room.get(clientId);
       room.delete(clientId);
 
-      if (leaving?.role === "viewer") {
-        // Viewers leaving do not terminate the room
+      if (leaving?.role === "participant") {
         const controller = getClientByRole(token, "controller");
         if (controller) {
-          send(controller.ws, { type: "viewer_left", viewerId: clientId });
+          send(controller.ws, { type: "participant_left" });
         }
-        return;
-      }
-
-      if (leaving?.role === "participant") {
-        // Give the participant 15 seconds to reconnect before terminating.
-        // This handles tab switches, brief network drops, and mobile backgrounding.
-        setTimeout(async () => {
-          // Check if participant has reconnected
-          const stillGone = !getClientByRole(token, "participant");
-          if (stillGone) {
-            const controller = getClientByRole(token, "controller");
-            if (controller) {
-              send(controller.ws, { type: "participant_left" });
-            }
-            await terminateRoom(token);
-          }
-        }, 15_000);
+        // Participant leaving = connection over
+        await terminateRoom(token);
       } else if (leaving?.role === "controller") {
-        // Give controller 15 seconds to reconnect too
-        setTimeout(async () => {
-          const stillGone = !getClientByRole(token, "controller");
-          if (stillGone) {
-            await terminateRoom(token);
-          }
-        }, 15_000);
+        // Controller leaving = also end
+        await terminateRoom(token);
       }
     });
 

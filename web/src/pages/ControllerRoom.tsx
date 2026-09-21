@@ -19,22 +19,21 @@ export default function ControllerRoom() {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
   const keyInputRef = useRef<HTMLInputElement>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
-  const viewerPCsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
-  // Store all remote tracks so they can be re-broadcast to viewers
-  const remoteTracksRef = useRef<MediaStreamTrack[]>([]);
 
   const [status, setStatus] = useState<"waiting" | "connecting" | "connected" | "ended">("waiting");
   const [copied, setCopied] = useState(false);
   const [showKeyboard, setShowKeyboard] = useState(false);
+  const [needsTap, setNeedsTap] = useState(false);
   const [viewOnly, setViewOnly] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
-  const [micMuted, setMicMuted] = useState(true);
+  const [micMuted, setMicMuted] = useState(false);
   const [hasMic, setHasMic] = useState(false);
 
-  function log(_msg: string) {}
+  function log(_msg: string) {
+    // debug logging removed after fix confirmed
+  }
 
   const joinUrl = `${window.location.origin}/join/${token ?? ""}`;
 
@@ -64,6 +63,12 @@ export default function ControllerRoom() {
       // Save session so refresh can offer to resume
       saveSession({ token: token!, role: "controller", path: `/wait/${token}` });
 
+      // Warn on refresh/close while session is active
+      const beforeUnload = (e: BeforeUnloadEvent) => {
+        e.preventDefault();
+      };
+      window.addEventListener("beforeunload", beforeUnload);
+
       sig.onMessage(async (msg) => {
         if (msg.type === "participant_joined") {
           log("participant joined");
@@ -71,54 +76,19 @@ export default function ControllerRoom() {
           await startOffer();
         }
         if (msg.type === "answer") {
-          const fromId = msg.fromId as string | undefined;
-          if (fromId) {
-            const vpc = viewerPCsRef.current.get(fromId);
-            if (vpc) {
-              await vpc.setRemoteDescription(
-                new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
-              );
-            }
-          } else {
-            await pcRef.current?.setRemoteDescription(
-              new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
-            );
-          }
+          await pc.setRemoteDescription(
+            new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
+          );
         }
         if (msg.type === "ice_candidate" && msg.candidate) {
-          const fromId = msg.fromId as string | undefined;
-          if (fromId) {
-            const vpc = viewerPCsRef.current.get(fromId);
-            if (vpc) {
-              await vpc.addIceCandidate(
-                new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
-              );
-            }
-          } else {
-            try {
-              await pcRef.current?.addIceCandidate(
-                new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
-              );
-            } catch { /* ignore stale candidates */ }
-          }
+          await pc.addIceCandidate(
+            new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
+          );
         }
         if (msg.type === "active") {
           setStatus("connected");
         }
-        if (msg.type === "viewer_joined") {
-          const viewerId = msg.viewerId as string;
-          log(`viewer joined: ${viewerId}`);
-          await startViewerOffer(viewerId);
-        }
-        if (msg.type === "viewer_left") {
-          const viewerId = msg.viewerId as string;
-          const vpc = viewerPCsRef.current.get(viewerId);
-          vpc?.close();
-          viewerPCsRef.current.delete(viewerId);
-        }
-        // Only end on explicit terminate — participant_left is a transient WS drop,
-        // handled by the server's 15s grace period
-        if (msg.type === "terminate") {
+        if (msg.type === "terminate" || msg.type === "participant_left") {
           cleanup();
           navigate("/");
         }
@@ -133,50 +103,67 @@ export default function ControllerRoom() {
       dcRef.current = dc;
       dc.onopen = () => setViewOnly(false);
 
-      // Receive screen (video) and participant mic (audio)
-      // Both recvonly — mic sending added lazily when user clicks the mic button
+      // Capture controller mic (optional — continue without if denied)
+      try {
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const micTrack = micStream.getAudioTracks()[0];
+        if (micTrack) {
+          pc.addTrack(micTrack, micStream);
+          micTrackRef.current = micTrack;
+          setHasMic(true);
+        }
+      } catch {
+        // Mic denied — continue without
+      }
+
+      // video: recvonly (we only receive the screen)
+      // audio: sendrecv (we send mic, receive participant mic)
       pc.addTransceiver("video", { direction: "recvonly" });
-      pc.addTransceiver("audio", { direction: "recvonly" });
+      if (!micTrackRef.current) {
+        // No mic track added — still negotiate audio recvonly to hear participant
+        pc.addTransceiver("audio", { direction: "recvonly" });
+      }
 
       pc.ontrack = (e) => {
-        log(`ontrack: ${e.track.kind} state=${e.track.readyState}`);
+        log(`ontrack: ${e.track.kind} streams=${e.streams.length}`);
+        const stream = e.streams[0] ?? new MediaStream([e.track]);
 
-        // Store for viewer re-broadcast
-        remoteTracksRef.current.push(e.track);
+        // Re-attach on every track event to handle renegotiation
+        const attachStream = () => {
+          const v = videoRef.current;
+          if (!v) return;
+          // Null then re-assign forces the decoder to reinitialise on mobile
+          v.srcObject = null;
+          v.srcObject = stream;
+          v.load();
+          v.play()
+            .then(() => {
+              log("video playing");
+              v.muted = false; // unmute now that autoplay succeeded
+            })
+            .catch((err) => {
+              log(`autoplay blocked: ${err}`);
+              setNeedsTap(true);
+            });
+        };
 
-        if (e.track.kind === "video") {
-          setStatus("connected");
-          setTimeout(() => {
-            const v = videoRef.current;
-            if (v) {
-              v.srcObject = new MediaStream([e.track]);
-              v.play().catch(() => {});
-            }
-          }, 100);
-          setTimeout(() => {
-            if (dcRef.current?.readyState !== "open") setViewOnly(true);
-          }, 3000);
-        }
+        attachStream();
+        setStatus("connected");
 
-        if (e.track.kind === "audio") {
-          setTimeout(() => {
-            const a = audioRef.current;
-            if (a) {
-              a.srcObject = new MediaStream([e.track]);
-              a.muted = false;
-              a.volume = 1;
-              a.play().catch(() => {
-                const unlock = () => {
-                  a.play().catch(() => {});
-                  document.removeEventListener("click", unlock);
-                  document.removeEventListener("touchend", unlock);
-                };
-                document.addEventListener("click", unlock, { once: true });
-                document.addEventListener("touchend", unlock, { once: true });
-              });
-            }
-          }, 100);
-        }
+        // Re-attach once more after a short delay — fixes black frame on
+        // some mobile Chrome versions where the decoder initialises late
+        setTimeout(() => {
+          if (videoRef.current?.readyState === 0) {
+            log("re-attaching stream (readyState=0)");
+            attachStream();
+          }
+        }, 1000);
+
+        setTimeout(() => {
+          if (dcRef.current?.readyState !== "open") {
+            setViewOnly(true);
+          }
+        }, 3000);
       };
 
       pc.onicecandidate = (e) => {
@@ -186,16 +173,19 @@ export default function ControllerRoom() {
       };
 
       pc.onconnectionstatechange = () => {
-        const state = pc.connectionState;
-        log(`conn: ${state}`);
-        if (state === "connected") setStatus("connected");
-        if (state === "failed") {
-          // Check pcRef status to avoid stale closure
-          const currentStatus = pcRef.current === pc ? "check" : "gone";
-          if (currentStatus === "gone") return;
+        log(`conn: ${pc.connectionState}`);
+        if (
+          pc.connectionState === "failed" ||
+          pc.connectionState === "disconnected" ||
+          pc.connectionState === "closed"
+        ) {
           cleanup();
           navigate("/");
         }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        log(`ICE: ${pc.iceConnectionState}`);
       };
 
       const offer = await pc.createOffer();
@@ -203,60 +193,14 @@ export default function ControllerRoom() {
       sig.send({ type: "offer", sdp: pc.localDescription });
     }
 
-    // ── Viewer offer ──────────────────────────────────────────────────────────
-    // When a viewer joins we create a separate PC just for them.
-    // They receive the same stream the participant is sending us (re-broadcast).
-    // We also send our mic to them.
-    async function startViewerOffer(viewerId: string) {
-      const vpc = new RTCPeerConnection({ iceServers: buildIceServers() });
-      viewerPCsRef.current.set(viewerId, vpc);
-
-      // Re-broadcast all remote tracks (video + audio) to the viewer
-      const remoteStream = new MediaStream(remoteTracksRef.current);
-      for (const track of remoteTracksRef.current) {
-        vpc.addTrack(track, remoteStream);
-      }
-
-      // Also send our mic to the viewer (if active and unmuted)
-      if (micTrackRef.current) {
-        const micStream = new MediaStream([micTrackRef.current]);
-        vpc.addTrack(micTrackRef.current, micStream);
-      }
-
-      vpc.onicecandidate = (e) => {
-        if (e.candidate) {
-          sig.send({
-            type: "ice_candidate",
-            candidate: e.candidate.toJSON(),
-            targetId: viewerId,
-          });
-        }
-      };
-
-      vpc.onconnectionstatechange = () => {
-        if (
-          vpc.connectionState === "failed" ||
-          vpc.connectionState === "closed"
-        ) {
-          viewerPCsRef.current.delete(viewerId);
-        }
-      };
-
-      const offer = await vpc.createOffer();
-      await vpc.setLocalDescription(offer);
-      sig.send({ type: "offer", sdp: vpc.localDescription, viewerId });
-    }
-
     void start();
     return () => cleanup();
 
     function cleanup() {
       clearSession();
+      window.removeEventListener("beforeunload", () => {});
       micTrackRef.current?.stop();
       micTrackRef.current = null;
-      remoteTracksRef.current = [];
-      viewerPCsRef.current.forEach((vpc) => vpc.close());
-      viewerPCsRef.current.clear();
       sig.close();
       pc?.close();
       setStatus("ended");
@@ -264,30 +208,14 @@ export default function ControllerRoom() {
   }, [token, navigate]);
 
   // ── Mic toggle ────────────────────────────────────────────────────────────
-  const handleMicToggle = async () => {
-    if (!micTrackRef.current) {
-      try {
-        const micStream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-          video: false,
-        });
-        const track = micStream.getAudioTracks()[0];
-        if (track && pcRef.current) {
-          track.enabled = false; // start muted
-          pcRef.current.addTrack(track, micStream);
-          micTrackRef.current = track;
-          setHasMic(true);
-          setMicMuted(true);
-        }
-      } catch { /* denied */ }
-      return;
-    }
+  function handleMicToggle() {
     const track = micTrackRef.current;
+    if (!track) return;
     track.enabled = !track.enabled;
     setMicMuted(!track.enabled);
-  };
+  }
 
-  // -- Control message sender ────────────────────────────────────────────────
+  // ── Control message sender ────────────────────────────────────────────────
   const sendControl = useCallback((msg: object) => {
     const dc = dcRef.current;
     if (dc?.readyState === "open") {
@@ -538,15 +466,15 @@ export default function ControllerRoom() {
     setTimeout(() => setCopied(false), 2000);
   }
 
-  const isWaiting = status === "waiting" || status === "connecting";
-
-  return (
-    <>
-      {isWaiting ? (
+  // ── Waiting / connecting ──────────────────────────────────────────────────
+  if (status === "waiting" || status === "connecting") {
+    return (
+      <>
         <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center gap-8 px-4">
           <h2 className="text-2xl font-semibold">
-            {status === "waiting" ? "Waiting for participant..." : "Connecting..."}
+            {status === "waiting" ? "Waiting for participant…" : "Connecting…"}
           </h2>
+
           <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 flex flex-col gap-4 w-full max-w-md">
             <p className="text-sm text-gray-400">Share this link with the participant:</p>
             <div className="flex items-center gap-2">
@@ -563,6 +491,7 @@ export default function ControllerRoom() {
               </button>
             </div>
           </div>
+
           <button
             onClick={handleTerminate}
             className="text-red-400 hover:text-red-300 text-sm transition-colors"
@@ -570,103 +499,137 @@ export default function ControllerRoom() {
             End Connection
           </button>
         </div>
-      ) : (
-        <div
-          className="min-h-screen bg-gray-950 text-white flex flex-col outline-none"
-          tabIndex={0}
-          onKeyDown={handleKeyDown}
-          onKeyUp={handleKeyUp}
-        >
-          <div className="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800">
-            <span className="font-semibold">Remota</span>
-            <div className="flex items-center gap-3">
-              {viewOnly ? (
-                <span className="flex items-center gap-2 text-sm text-blue-400">
-                  <span className="w-2 h-2 bg-blue-400 rounded-full inline-block animate-pulse" />
-                  View only
-                </span>
-              ) : (
-                <span className="flex items-center gap-2 text-sm text-green-400">
-                  <span className="w-2 h-2 bg-green-400 rounded-full inline-block animate-pulse" />
-                  Connected
-                </span>
-              )}
-              {!viewOnly && (
-                <button
-                  onClick={toggleKeyboard}
-                  className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
-                    showKeyboard ? "bg-blue-600 text-white" : "bg-gray-800 text-gray-300 hover:bg-gray-700"
-                  }`}
-                  aria-label="Toggle keyboard"
-                >
-                  Keyboard
-                </button>
-              )}
-              <button
-                onClick={handleMicToggle}
-                className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
-                  !hasMic
-                    ? "bg-gray-800 text-gray-500 hover:bg-gray-700"
-                    : micMuted
-                    ? "bg-red-900/60 text-red-400 hover:bg-red-900"
-                    : "bg-gray-800 text-gray-300 hover:bg-gray-700"
-                }`}
-              >
-                {micMuted ? "Mic Off" : "Mic On"}
-              </button>
-              <button
-                onClick={handleTerminate}
-                className="bg-red-600 hover:bg-red-500 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition-colors"
-              >
-                End
-              </button>
-            </div>
-          </div>
 
-          <div className="flex-1 relative flex items-center justify-center bg-black">
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-full object-contain select-none touch-none bg-black"
-              style={{ cursor: viewOnly ? "default" : "none" }}
-              onPointerMove={viewOnly ? undefined : handlePointerMove}
-              onPointerDown={viewOnly ? undefined : handlePointerDown}
-              onPointerUp={viewOnly ? undefined : handlePointerUp}
-              onDoubleClick={viewOnly ? undefined : handleDoubleClick}
-              onWheel={viewOnly ? undefined : handleWheel}
-              onContextMenu={(e) => e.preventDefault()}
-              onTouchStart={viewOnly ? undefined : handleTouchStart}
-              onTouchMove={viewOnly ? undefined : handleTouchMove}
-              onTouchEnd={viewOnly ? undefined : handleTouchEnd}
-              onTouchCancel={viewOnly ? undefined : handleTouchEnd}
-            />
-            <audio
-              ref={audioRef}
-              autoPlay
-              playsInline
-              style={{ position: "absolute", width: 0, height: 0, opacity: 0 }}
-            />
-          </div>
-
-          <input
-            ref={keyInputRef}
-            type="text"
-            inputMode="text"
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="off"
-            spellCheck={false}
-            className="absolute opacity-0 w-0 h-0 pointer-events-none"
-            aria-hidden="true"
-            onInput={handleSoftInput}
-            onKeyDown={handleSoftKeyDown}
-            onBlur={() => setShowKeyboard(false)}
+        {showConfirm && (
+          <ConfirmDialog
+            message="Are you sure you want to end this connection?"
+            confirmLabel="End Connection"
+            onConfirm={confirmTerminate}
+            onCancel={() => setShowConfirm(false)}
           />
-        </div>
-      )}
+        )}
+      </>
+    );
+  }
 
+  // ── Connected ─────────────────────────────────────────────────────────────
+  return (
+    <div
+      className="min-h-screen bg-gray-950 text-white flex flex-col outline-none"
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      onKeyUp={handleKeyUp}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800">
+        <span className="font-semibold">Remota</span>
+        <div className="flex items-center gap-3">
+          {viewOnly ? (
+            <span className="flex items-center gap-2 text-sm text-blue-400">
+              <span className="w-2 h-2 bg-blue-400 rounded-full inline-block animate-pulse" />
+              View only
+            </span>
+          ) : (
+            <span className="flex items-center gap-2 text-sm text-green-400">
+              <span className="w-2 h-2 bg-green-400 rounded-full inline-block animate-pulse" />
+              Connected
+            </span>
+          )}
+          {/* Keyboard toggle — only shown in full control mode */}
+          {!viewOnly && (
+            <button
+              onClick={toggleKeyboard}
+              className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                showKeyboard
+                  ? "bg-blue-600 text-white"
+                  : "bg-gray-800 text-gray-300 hover:bg-gray-700"
+              }`}
+              aria-label="Toggle keyboard"
+            >
+              ⌨
+            </button>
+          )}
+          {/* Mic toggle */}
+          {hasMic && (
+            <button
+              onClick={handleMicToggle}
+              className={`text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                micMuted
+                  ? "bg-red-900/60 text-red-400 hover:bg-red-900"
+                  : "bg-gray-800 text-gray-300 hover:bg-gray-700"
+              }`}
+              aria-label={micMuted ? "Unmute mic" : "Mute mic"}
+            >
+              {micMuted ? "🔇" : "🎙️"}
+            </button>
+          )}
+          <button
+            onClick={handleTerminate}
+            className="bg-red-600 hover:bg-red-500 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition-colors"
+          >
+            End
+          </button>
+        </div>
+      </div>
+
+      {/* Remote screen */}
+      <div className="flex-1 relative flex items-center justify-center bg-black">
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted={needsTap} // muted until user gesture unlocks audio
+          className="w-full h-full object-contain select-none touch-none bg-black"
+          style={{ cursor: viewOnly ? "default" : "none" }}
+          onPointerMove={viewOnly ? undefined : handlePointerMove}
+          onPointerDown={viewOnly ? undefined : handlePointerDown}
+          onPointerUp={viewOnly ? undefined : handlePointerUp}
+          onDoubleClick={viewOnly ? undefined : handleDoubleClick}
+          onWheel={viewOnly ? undefined : handleWheel}
+          onContextMenu={(e) => e.preventDefault()}
+          onTouchStart={viewOnly ? undefined : handleTouchStart}
+          onTouchMove={viewOnly ? undefined : handleTouchMove}
+          onTouchEnd={viewOnly ? undefined : handleTouchEnd}
+          onTouchCancel={viewOnly ? undefined : handleTouchEnd}
+        />
+
+        {/* Tap-to-start overlay — fixed fullscreen so it's always visible on mobile */}
+        {needsTap && (
+          <button
+            className="fixed inset-0 z-40 flex flex-col items-center justify-center bg-gray-950 text-white gap-4"
+            onClick={() => {
+              videoRef.current?.play()
+                .then(() => {
+                  setNeedsTap(false);
+                  if (videoRef.current) videoRef.current.muted = false;
+                })
+                .catch(() => {}); // still blocked — keep overlay
+            }}
+          >
+            <span className="text-5xl">▶</span>
+            <span className="text-xl font-semibold">Tap to view screen</span>
+            <span className="text-sm text-gray-400">Tap anywhere to start the remote stream</span>
+          </button>
+        )}
+      </div>
+
+      {/* Soft keyboard input (hidden, focused when keyboard toggle is on) */}
+      <input
+        ref={keyInputRef}
+        type="text"
+        inputMode="text"
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck={false}
+        className="absolute opacity-0 w-0 h-0 pointer-events-none"
+        aria-hidden="true"
+        onInput={handleSoftInput}
+        onKeyDown={handleSoftKeyDown}
+        onBlur={() => setShowKeyboard(false)}
+      />
+
+      {/* End connection confirmation */}
       {showConfirm && (
         <ConfirmDialog
           message="Are you sure you want to end this connection? The session will be terminated for both parties."
@@ -675,7 +638,6 @@ export default function ControllerRoom() {
           onCancel={() => setShowConfirm(false)}
         />
       )}
-
-    </>
+    </div>
   );
 }
