@@ -3,12 +3,22 @@ import { IncomingMessage } from "http";
 import { Server } from "http";
 import prisma from "../lib/prisma";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Contract ─────────────────────────────────────────────────────────────────
+//
+// The server is the ONLY entity that terminates a session.
+// Clients send a "terminate" REQUEST. The server broadcasts "terminate" to ALL
+// parties and then closes all connections. Clients act only on receiving
+// "terminate" from the server — never on WebSocket close or WebRTC state.
+//
+// WS close (tab close, network drop) → 10s grace period → server terminates
+// Explicit terminate message from any client → server terminates immediately
+//
+// ─────────────────────────────────────────────────────────────────────────────
 
 type Role = "controller" | "participant";
 
 interface RoomClient {
-  ws: WebSocket;
+  ws: WebSocket & { isAlive?: boolean };
   role: Role;
   token: string;
 }
@@ -19,9 +29,10 @@ type SignalType =
   | "answer"
   | "ice_candidate"
   | "participant_joined"
-  | "participant_left"
   | "active"
   | "terminate"
+  | "ping"
+  | "pong"
   | "error";
 
 interface SignalMessage {
@@ -31,8 +42,9 @@ interface SignalMessage {
 
 // ─── Room Registry ────────────────────────────────────────────────────────────
 
-// Map<roomToken, Map<clientId, RoomClient>>
 const rooms = new Map<string, Map<string, RoomClient>>();
+// Track pending grace timers so we can cancel them if the client reconnects
+const graceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 let _clientId = 0;
 function nextClientId() {
@@ -45,11 +57,7 @@ function send(ws: WebSocket, msg: SignalMessage) {
   }
 }
 
-function broadcastToRoom(
-  token: string,
-  msg: SignalMessage,
-  exclude?: WebSocket
-) {
+function broadcastToRoom(token: string, msg: SignalMessage, exclude?: WebSocket) {
   const room = rooms.get(token);
   if (!room) return;
   for (const client of room.values()) {
@@ -59,10 +67,7 @@ function broadcastToRoom(
   }
 }
 
-function getClientByRole(
-  token: string,
-  role: Role
-): RoomClient | undefined {
+function getClientByRole(token: string, role: Role): RoomClient | undefined {
   const room = rooms.get(token);
   if (!room) return undefined;
   for (const client of room.values()) {
@@ -71,9 +76,17 @@ function getClientByRole(
   return undefined;
 }
 
-// ─── Cleanup ──────────────────────────────────────────────────────────────────
+// ─── Termination (server is sole authority) ───────────────────────────────────
 
 export async function terminateRoom(token: string, initiator?: WebSocket) {
+  // Cancel any pending grace timer for this room
+  const timer = graceTimers.get(token);
+  if (timer) {
+    clearTimeout(timer);
+    graceTimers.delete(token);
+  }
+
+  // Broadcast terminate to all clients (server is telling everyone to clean up)
   broadcastToRoom(token, { type: "terminate" }, initiator);
 
   const room = rooms.get(token);
@@ -94,10 +107,6 @@ export async function terminateRoom(token: string, initiator?: WebSocket) {
   }
 }
 
-/**
- * Called by the expiry job to close WebSocket clients for rooms that have
- * just been marked EXPIRED in the database.
- */
 export function terminateExpiredRooms(tokens: string[]) {
   for (const token of tokens) {
     const room = rooms.get(token);
@@ -107,25 +116,55 @@ export function terminateExpiredRooms(tokens: string[]) {
       client.ws.close();
     }
     rooms.delete(token);
+    const timer = graceTimers.get(token);
+    if (timer) {
+      clearTimeout(timer);
+      graceTimers.delete(token);
+    }
   }
 }
 
-// ─── WebSocket Server Factory ─────────────────────────────────────────────────
+// ─── WebSocket Server ─────────────────────────────────────────────────────────
 
 export function createSignalingServer(httpServer: Server) {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
-  wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
+  // Server-side heartbeat — detect dead connections
+  const heartbeat = setInterval(() => {
+    wss.clients.forEach((rawWs) => {
+      const ws = rawWs as WebSocket & { isAlive?: boolean };
+      if (ws.isAlive === false) {
+        ws.terminate();
+        return;
+      }
+      ws.isAlive = false;
+      ws.ping();
+    });
+  }, 30_000);
+
+  wss.on("close", () => clearInterval(heartbeat));
+
+  wss.on("connection", (rawWs: WebSocket, _req: IncomingMessage) => {
+    const ws = rawWs as WebSocket & { isAlive?: boolean };
+    ws.isAlive = true;
+    ws.on("pong", () => { ws.isAlive = true; });
+
     const clientId = nextClientId();
     let assignedToken: string | null = null;
+    let assignedRole: Role | null = null;
 
     ws.on("message", async (raw) => {
       let msg: SignalMessage;
-
       try {
         msg = JSON.parse(raw.toString()) as SignalMessage;
       } catch {
         send(ws, { type: "error", message: "Invalid JSON" });
+        return;
+      }
+
+      // Keepalive ping from client
+      if (msg.type === "ping") {
+        send(ws, { type: "pong" });
         return;
       }
 
@@ -139,7 +178,6 @@ export function createSignalingServer(httpServer: Server) {
           return;
         }
 
-        // Validate room in DB
         let room;
         try {
           room = await prisma.room.findUnique({ where: { token } });
@@ -165,21 +203,25 @@ export function createSignalingServer(httpServer: Server) {
         // Prevent duplicate roles
         const existing = getClientByRole(token, role);
         if (existing) {
-          send(ws, {
-            type: "error",
-            message: `A ${role} is already connected`,
-          });
+          send(ws, { type: "error", message: `A ${role} is already connected` });
           return;
         }
 
-        // Register client
+        // Cancel any grace timer for this role rejoining
+        const timerKey = `${token}:${role}`;
+        const existingTimer = graceTimers.get(timerKey);
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+          graceTimers.delete(timerKey);
+        }
+
         if (!rooms.has(token)) {
           rooms.set(token, new Map());
         }
         rooms.get(token)!.set(clientId, { ws, role, token });
         assignedToken = token;
+        assignedRole = role;
 
-        // Update room status when participant joins
         if (role === "participant") {
           try {
             await prisma.room.update({
@@ -188,7 +230,6 @@ export function createSignalingServer(httpServer: Server) {
             });
           } catch { /* non-fatal */ }
 
-          // Notify controller that participant joined
           const controller = getClientByRole(token, "controller");
           if (controller) {
             send(controller.ws, { type: "participant_joined" });
@@ -196,7 +237,6 @@ export function createSignalingServer(httpServer: Server) {
         }
 
         if (role === "controller") {
-          // Check if participant already present
           const participant = getClientByRole(token, "participant");
           if (participant) {
             send(ws, { type: "participant_joined" });
@@ -206,7 +246,6 @@ export function createSignalingServer(httpServer: Server) {
         return;
       }
 
-      // All further messages require the client to have joined
       if (!assignedToken) {
         send(ws, { type: "error", message: "Not joined to any room" });
         return;
@@ -214,7 +253,7 @@ export function createSignalingServer(httpServer: Server) {
 
       const token = assignedToken;
 
-      // ── offer (controller → participant) ───────────────────────────────────
+      // ── offer ──────────────────────────────────────────────────────────────
       if (msg.type === "offer") {
         const participant = getClientByRole(token, "participant");
         if (participant) {
@@ -223,7 +262,7 @@ export function createSignalingServer(httpServer: Server) {
         return;
       }
 
-      // ── answer (participant → controller) ──────────────────────────────────
+      // ── answer ─────────────────────────────────────────────────────────────
       if (msg.type === "answer") {
         const controller = getClientByRole(token, "controller");
         if (controller) {
@@ -232,13 +271,13 @@ export function createSignalingServer(httpServer: Server) {
         return;
       }
 
-      // ── ice_candidate (relayed to the other side) ──────────────────────────
+      // ── ice_candidate ──────────────────────────────────────────────────────
       if (msg.type === "ice_candidate") {
         broadcastToRoom(token, { type: "ice_candidate", candidate: msg.candidate }, ws);
         return;
       }
 
-      // ── active (participant desktop signals WebRTC is connected) ───────────
+      // ── active ─────────────────────────────────────────────────────────────
       if (msg.type === "active") {
         try {
           await prisma.room.update({
@@ -246,7 +285,6 @@ export function createSignalingServer(httpServer: Server) {
             data: { status: "ACTIVE" },
           });
         } catch { /* non-fatal */ }
-        // Forward to controller so it can update its UI state if needed
         const controller = getClientByRole(token, "controller");
         if (controller) {
           send(controller.ws, { type: "active" });
@@ -254,47 +292,40 @@ export function createSignalingServer(httpServer: Server) {
         return;
       }
 
-      // ── terminate ──────────────────────────────────────────────────────────
+      // ── terminate (client requesting termination) ──────────────────────────
+      // Any client can request termination. The server is authoritative —
+      // it broadcasts "terminate" to ALL parties including the requester.
       if (msg.type === "terminate") {
-        await terminateRoom(token, ws);
+        await terminateRoom(token);
         return;
       }
     });
 
     ws.on("close", async () => {
-      if (!assignedToken) return;
+      if (!assignedToken || !assignedRole) return;
 
       const token = assignedToken;
+      const role = assignedRole;
       const room = rooms.get(token);
       if (!room) return;
 
-      const leaving = room.get(clientId);
       room.delete(clientId);
 
-      if (leaving?.role === "participant") {
-        // Grace period — give participant 15s to reconnect before terminating.
-        // Handles brief network drops, tab switches, and same-PC browser quirks.
-        const leavingToken = token;
-        setTimeout(async () => {
-          const stillGone = !getClientByRole(leavingToken, "participant");
-          if (stillGone) {
-            const controller = getClientByRole(leavingToken, "controller");
-            if (controller) {
-              send(controller.ws, { type: "participant_left" });
-            }
-            await terminateRoom(leavingToken);
-          }
-        }, 15_000);
-      } else if (leaving?.role === "controller") {
-        // Grace period for controller too
-        const leavingToken = token;
-        setTimeout(async () => {
-          const stillGone = !getClientByRole(leavingToken, "controller");
-          if (stillGone) {
-            await terminateRoom(leavingToken);
-          }
-        }, 15_000);
-      }
+      // Start a grace period. If the client reconnects and rejoins within
+      // 10 seconds, the timer is cancelled (see join handler above).
+      // If not, the server terminates the room.
+      // We key the timer by token:role so rejoining the same role cancels it.
+      const timerKey = `${token}:${role}`;
+      const timer = setTimeout(async () => {
+        graceTimers.delete(timerKey);
+        // Check if the role has been filled again by a reconnect
+        const rejoined = getClientByRole(token, role);
+        if (!rejoined) {
+          // The client did not reconnect — server terminates the room
+          await terminateRoom(token);
+        }
+      }, 10_000);
+      graceTimers.set(timerKey, timer);
     });
 
     ws.on("error", (err) => {
