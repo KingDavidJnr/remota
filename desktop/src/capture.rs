@@ -105,7 +105,7 @@ mod platform {
         let settings = Settings::new(
             monitor,
             CursorCaptureSettings::WithCursor,
-            DrawBorderSettings::Default,
+            DrawBorderSettings::WithoutBorder,
             SecondaryWindowSettings::Default,
             MinimumUpdateIntervalSettings::Default,
             DirtyRegionSettings::Default,
