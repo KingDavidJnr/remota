@@ -160,9 +160,17 @@ async fn run(ws_url: &str, token: &str) -> Result<()> {
                             error!("[main] add_ice_candidate: {e}");
                         }
                     }
-                    signaling::SignalEvent::Terminate | signaling::SignalEvent::Disconnected => {
-                        info!("[main] session terminated by signal");
+                    // Server told us the session is over — clean up and exit.
+                    // Do NOT send terminate back — the server already terminated the room.
+                    signaling::SignalEvent::Terminate => {
+                        info!("[main] session terminated by server");
                         break;
+                    }
+                    // WebSocket disconnected — server grace period is counting.
+                    // Do NOT exit — wait for the server to decide.
+                    // If server terminates we will get SignalEvent::Terminate above.
+                    signaling::SignalEvent::Disconnected => {
+                        info!("[main] signaling disconnected — waiting for server");
                     }
                 }
             }
@@ -175,16 +183,17 @@ async fn run(ws_url: &str, token: &str) -> Result<()> {
                 match state {
                     RTCPeerConnectionState::Connected => {
                         let _ = signal_tx.send(r#"{"type":"active"}"#.to_owned()).await;
-                        // Show a Windows notification balloon so the participant
-                        // knows remote control is active even without a console
                         show_active_notification();
                     }
-                    RTCPeerConnectionState::Failed
-                    | RTCPeerConnectionState::Disconnected
-                    | RTCPeerConnectionState::Closed => {
-                        info!("[main] WebRTC connection ended ({state:?})");
-                        break;
+                    // "failed" is unrecoverable — send terminate REQUEST to server.
+                    // Server will broadcast terminate to all parties including us,
+                    // and we will break the loop on receiving SignalEvent::Terminate.
+                    RTCPeerConnectionState::Failed => {
+                        info!("[main] WebRTC failed — requesting termination");
+                        let _ = signal_tx.send(r#"{"type":"terminate"}"#.to_owned()).await;
                     }
+                    // "disconnected" is transient — do NOT terminate.
+                    // "closed" means we closed the PC ourselves — already cleaning up.
                     _ => {}
                 }
             }
@@ -195,7 +204,9 @@ async fn run(ws_url: &str, token: &str) -> Result<()> {
     input.release_all_modifiers();
     stop_capture.store(true, Ordering::Relaxed);
     session.close().await;
-    let _ = signal_tx.send(signaling::make_terminate_msg()).await;
+    // Do NOT send terminate here — the server already terminated the room
+    // (we only reach this point after receiving SignalEvent::Terminate from the server,
+    // or after sending a terminate request ourselves due to WebRTC failure).
 
     // Force process exit — with windows_subsystem = "windows" there is no
     // console or window to close, so we must exit explicitly.
