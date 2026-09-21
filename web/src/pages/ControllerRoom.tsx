@@ -103,14 +103,19 @@ export default function ControllerRoom() {
       dcRef.current = dc;
       dc.onopen = () => setViewOnly(false);
 
-      // Capture controller mic (optional — continue without if denied)
+      // Capture controller mic — starts muted, user must click to unmute
       try {
-        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true },
+          video: false,
+        });
         const micTrack = micStream.getAudioTracks()[0];
         if (micTrack) {
+          micTrack.enabled = false; // muted by default
           pc.addTrack(micTrack, micStream);
           micTrackRef.current = micTrack;
           setHasMic(true);
+          setMicMuted(true);
         }
       } catch {
         // Mic denied — continue without
@@ -139,11 +144,18 @@ export default function ControllerRoom() {
           v.play()
             .then(() => {
               log("video playing");
-              v.muted = false; // unmute now that autoplay succeeded
+              v.muted = false;
             })
             .catch((err) => {
               log(`autoplay blocked: ${err}`);
-              setNeedsTap(true);
+              // Only show tap overlay on touch devices — desktop autoplay should not fail
+              if ("ontouchstart" in window) {
+                setNeedsTap(true);
+              } else {
+                // Desktop: retry once muted then unmute
+                v.muted = true;
+                v.play().then(() => { v.muted = false; }).catch(() => {});
+              }
             });
         };
 
@@ -170,6 +182,15 @@ export default function ControllerRoom() {
         if (e.candidate) {
           sig.send({ type: "ice_candidate", candidate: e.candidate.toJSON() });
         }
+      };
+
+      // Handle renegotiation (e.g. when mic track is added after connection)
+      pc.onnegotiationneeded = async () => {
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          sig.send({ type: "offer", sdp: pc.localDescription });
+        } catch { /* ignore if PC is closing */ }
       };
 
       pc.onconnectionstatechange = () => {
