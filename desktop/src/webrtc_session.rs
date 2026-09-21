@@ -224,6 +224,10 @@ pub async fn run_encoding_loop(
     // Channel: encoding thread → async write task
     let (encoded_tx, mut encoded_rx) = mpsc::channel::<Bytes>(8);
 
+    // Capture the tokio runtime handle before entering the std thread
+    // so we can use block_on to drive async receives from within the OS thread.
+    let handle = tokio::runtime::Handle::current();
+
     // Encoding thread — owns the !Send Encoder entirely within one OS thread
     std::thread::spawn(move || {
         let mut encoder: Option<Encoder> = None;
@@ -231,12 +235,7 @@ pub async fn run_encoding_loop(
         let mut last_h: u32 = 0;
         let mut frame_idx: i64 = 0;
 
-        // Drive the tokio receiver synchronously via blocking recv
-        // We use a std mpsc internally — bridge from tokio channel via blocking
-        while let Some(frame) = {
-            // Block the OS thread waiting for the next frame from the tokio channel
-            tokio::runtime::Handle::current().block_on(frame_rx.recv())
-        } {
+        while let Some(frame) = handle.block_on(frame_rx.recv()) {
             let w = frame.width;
             let h = frame.height;
 

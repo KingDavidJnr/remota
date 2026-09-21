@@ -1,6 +1,8 @@
 // ── Remota Desktop Endpoint ───────────────────────────────────────────────────
-// Windows native application — runs as a visible console process so the
-// participant can see status messages and confirm remote control is active.
+// Windows native application.
+// Runs without a console window — status shown via Windows notifications.
+
+#![windows_subsystem = "windows"]
 //
 // The user does not need to configure anything. The server URL and TURN
 // credentials are baked into the binary at build time.
@@ -172,12 +174,10 @@ async fn run(ws_url: &str, token: &str) -> Result<()> {
             Some(state) = state_rx.recv() => {
                 match state {
                     RTCPeerConnectionState::Connected => {
-                        info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                        info!("  ● REMOTE CONTROL IS NOW ACTIVE");
-                        info!("  The other person can see and control your screen.");
-                        info!("  Close this window or press Ctrl+C to end the session.");
-                        info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                         let _ = signal_tx.send(r#"{"type":"active"}"#.to_owned()).await;
+                        // Show a Windows notification balloon so the participant
+                        // knows remote control is active even without a console
+                        show_active_notification();
                     }
                     RTCPeerConnectionState::Failed
                     | RTCPeerConnectionState::Disconnected
@@ -225,4 +225,28 @@ fn get_primary_screen_dimensions() -> (u32, u32) {
     }
 
     (1920, 1080)
+}
+
+/// Shows a Windows MessageBox informing the participant remote control is active.
+/// Non-blocking — spawned on a background thread so it doesn't block the event loop.
+fn show_active_notification() {
+    #[cfg(target_os = "windows")]
+    std::thread::spawn(|| {
+        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONINFORMATION, MB_TOPMOST};
+        use windows::core::PCWSTR;
+
+        let title: Vec<u16> = "Remota — Remote Access Active\0".encode_utf16().collect();
+        let msg: Vec<u16> = "Remote access is now active.\nThe other person can see your screen.\n\nClose the Remota Desktop app to end the session.\0"
+            .encode_utf16()
+            .collect();
+
+        unsafe {
+            MessageBoxW(
+                None,
+                PCWSTR(msg.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONINFORMATION | MB_TOPMOST,
+            );
+        }
+    });
 }
