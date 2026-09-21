@@ -161,16 +161,16 @@ async fn run(ws_url: &str, token: &str) -> Result<()> {
                         }
                     }
                     // Server told us the session is over — clean up and exit.
-                    // Do NOT send terminate back — the server already terminated the room.
                     signaling::SignalEvent::Terminate => {
                         info!("[main] session terminated by server");
                         break;
                     }
                     // WebSocket disconnected — server grace period is counting.
-                    // Do NOT exit — wait for the server to decide.
-                    // If server terminates we will get SignalEvent::Terminate above.
+                    // Exit after 12s (slightly longer than the server's 10s grace).
                     signaling::SignalEvent::Disconnected => {
-                        info!("[main] signaling disconnected — waiting for server");
+                        info!("[main] signaling disconnected — exiting in 12s");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(12)).await;
+                        break;
                     }
                 }
             }

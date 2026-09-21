@@ -131,22 +131,18 @@ export default function ControllerRoom() {
         const attachStream = () => {
           const v = videoRef.current;
           if (!v) return;
-          // Null then re-assign forces the decoder to reinitialise on mobile
           v.srcObject = null;
           v.srcObject = stream;
-          v.load();
+          // Do NOT call v.load() — it resets the decoder for live streams
           v.play()
             .then(() => {
-              log("video playing");
               v.muted = false;
             })
             .catch((err) => {
               log(`autoplay blocked: ${err}`);
-              // Only show tap overlay on touch devices — desktop autoplay should not fail
               if ("ontouchstart" in window) {
                 setNeedsTap(true);
               } else {
-                // Desktop: retry once muted then unmute
                 v.muted = true;
                 v.play().then(() => { v.muted = false; }).catch(() => {});
               }

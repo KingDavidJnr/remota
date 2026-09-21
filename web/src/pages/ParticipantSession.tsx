@@ -65,9 +65,12 @@ export default function ParticipantSession() {
   }
 
   function confirmTerminate() {
-    // Send terminate REQUEST to server — server will broadcast to all parties
-    sigRef.current?.send({ type: "terminate" });
-    // Do not navigate yet — wait for server to send terminate back to us
+    // The desktop app owns the session. We navigate away immediately.
+    // The desktop app will detect the WS close and the server will terminate
+    // the room after the grace period.
+    clearSession();
+    sigRef.current?.close();
+    navigate("/");
   }
 
   if (status === "ended") {
