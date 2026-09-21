@@ -191,14 +191,15 @@ async fn run(ws_url: &str, token: &str) -> Result<()> {
         }
     }
 
-    info!("[main] cleaning up — releasing all input…");
+    info!("[main] cleaning up — releasing all input...");
     input.release_all_modifiers();
     stop_capture.store(true, Ordering::Relaxed);
     session.close().await;
     let _ = signal_tx.send(signaling::make_terminate_msg()).await;
 
-    info!("[main] session ended. You may close this window.");
-    Ok(())
+    // Force process exit — with windows_subsystem = "windows" there is no
+    // console or window to close, so we must exit explicitly.
+    std::process::exit(0);
 }
 
 fn get_primary_screen_dimensions() -> (u32, u32) {
