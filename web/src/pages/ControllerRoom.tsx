@@ -88,7 +88,9 @@ export default function ControllerRoom() {
         if (msg.type === "active") {
           setStatus("connected");
         }
-        if (msg.type === "terminate" || msg.type === "participant_left") {
+        // Only end on explicit terminate — participant_left is handled by
+        // the server grace period, not immediately on the client
+        if (msg.type === "terminate") {
           cleanup();
           navigate("/");
         }

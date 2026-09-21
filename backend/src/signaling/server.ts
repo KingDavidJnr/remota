@@ -272,15 +272,28 @@ export function createSignalingServer(httpServer: Server) {
       room.delete(clientId);
 
       if (leaving?.role === "participant") {
-        const controller = getClientByRole(token, "controller");
-        if (controller) {
-          send(controller.ws, { type: "participant_left" });
-        }
-        // Participant leaving = connection over
-        await terminateRoom(token);
+        // Grace period — give participant 15s to reconnect before terminating.
+        // Handles brief network drops, tab switches, and same-PC browser quirks.
+        const leavingToken = token;
+        setTimeout(async () => {
+          const stillGone = !getClientByRole(leavingToken, "participant");
+          if (stillGone) {
+            const controller = getClientByRole(leavingToken, "controller");
+            if (controller) {
+              send(controller.ws, { type: "participant_left" });
+            }
+            await terminateRoom(leavingToken);
+          }
+        }, 15_000);
       } else if (leaving?.role === "controller") {
-        // Controller leaving = also end
-        await terminateRoom(token);
+        // Grace period for controller too
+        const leavingToken = token;
+        setTimeout(async () => {
+          const stillGone = !getClientByRole(leavingToken, "controller");
+          if (stillGone) {
+            await terminateRoom(leavingToken);
+          }
+        }, 15_000);
       }
     });
 
