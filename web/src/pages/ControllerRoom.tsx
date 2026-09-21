@@ -57,39 +57,31 @@ export default function ControllerRoom() {
 
     async function start() {
       await sig.connect();
-      log("signaling connected");
       sig.send({ type: "join", token, role: "controller" });
-
-      // Save session so refresh can offer to resume
       saveSession({ token: token!, role: "controller", path: `/wait/${token}` });
-
-      // Warn on refresh/close while session is active
-      const beforeUnload = (e: BeforeUnloadEvent) => {
-        e.preventDefault();
-      };
-      window.addEventListener("beforeunload", beforeUnload);
 
       sig.onMessage(async (msg) => {
         if (msg.type === "participant_joined") {
-          log("participant joined");
           setStatus("connecting");
           await startOffer();
         }
         if (msg.type === "answer") {
-          await pc.setRemoteDescription(
+          await pcRef.current?.setRemoteDescription(
             new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
           );
         }
         if (msg.type === "ice_candidate" && msg.candidate) {
-          await pc.addIceCandidate(
-            new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
-          );
+          try {
+            await pcRef.current?.addIceCandidate(
+              new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
+            );
+          } catch { /* ignore stale candidates */ }
         }
         if (msg.type === "active") {
           setStatus("connected");
         }
-        // Only end on explicit terminate — participant_left is handled by
-        // the server grace period, not immediately on the client
+        // CONTRACT: The server sends "terminate" to tell us the session is over.
+        // This is the ONLY signal that causes us to navigate away.
         if (msg.type === "terminate") {
           cleanup();
           navigate("/");
@@ -186,7 +178,7 @@ export default function ControllerRoom() {
         }
       };
 
-      // Handle renegotiation (e.g. when mic track is added after connection)
+      // Handle renegotiation (e.g. when mic unmuted after connection)
       pc.onnegotiationneeded = async () => {
         try {
           const offer = await pc.createOffer();
@@ -195,20 +187,16 @@ export default function ControllerRoom() {
         } catch { /* ignore if PC is closing */ }
       };
 
+      // CONTRACT: Only WebRTC "failed" is unrecoverable.
+      // "disconnected" is transient — do NOT terminate on it.
+      // "closed" happens when we ourselves close the PC (already cleaning up).
+      // On "failed" we ask the SERVER to terminate — we do not self-terminate.
       pc.onconnectionstatechange = () => {
-        log(`conn: ${pc.connectionState}`);
-        if (
-          pc.connectionState === "failed" ||
-          pc.connectionState === "disconnected" ||
-          pc.connectionState === "closed"
-        ) {
-          cleanup();
-          navigate("/");
+        if (pc.connectionState === "failed") {
+          // Ask server to terminate. Server will broadcast terminate to all
+          // parties and we will navigate away on receiving that message.
+          sig.send({ type: "terminate" });
         }
-      };
-
-      pc.oniceconnectionstatechange = () => {
-        log(`ICE: ${pc.iceConnectionState}`);
       };
 
       const offer = await pc.createOffer();
@@ -221,12 +209,10 @@ export default function ControllerRoom() {
 
     function cleanup() {
       clearSession();
-      window.removeEventListener("beforeunload", () => {});
       micTrackRef.current?.stop();
       micTrackRef.current = null;
       sig.close();
       pc?.close();
-      setStatus("ended");
     }
   }, [token, navigate]);
 
