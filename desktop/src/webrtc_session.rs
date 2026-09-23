@@ -115,9 +115,8 @@ impl Session {
             "remota-screen".to_owned(),
         ));
 
-        pc.add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
-            .await
-            .context("add video track")?;
+        // Track is added in handle_offer() after set_remote_description()
+        // so it correctly maps to the controller's recvonly transceiver slot.
 
         // ── DataChannel (inbound control) ─────────────────────────────────────
         {
@@ -178,6 +177,16 @@ impl Session {
         let offer = RTCSessionDescription::offer(sdp.to_owned())
             .context("parse offer SDP")?;
         self.pc.set_remote_description(offer).await?;
+
+        // Add the video track AFTER set_remote_description so the transceiver
+        // created by the offer's recvonly video m-line is matched correctly.
+        // Adding the track before set_remote_description means webrtc-rs creates
+        // a new sendrecv transceiver instead of reusing the offer's recvonly slot,
+        // causing the browser's ontrack to never fire.
+        self.pc
+            .add_track(Arc::clone(&self.video_track) as Arc<dyn TrackLocal + Send + Sync>)
+            .await
+            .context("add video track in handle_offer")?;
 
         let answer = self.pc.create_answer(None).await?;
         let mut gather_complete = self.pc.gathering_complete_promise().await;
