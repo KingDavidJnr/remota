@@ -227,6 +227,7 @@ const TARGET_BITRATE_KBPS: u32 = 2000;
 pub async fn run_encoding_loop(
     track: Arc<TrackLocalStaticSample>,
     mut frame_rx: mpsc::Receiver<CapturedFrame>,
+    force_keyframe: Arc<std::sync::atomic::AtomicBool>,
 ) {
     info!("[encode] encoding loop started ({TARGET_FPS} fps, {TARGET_BITRATE_KBPS} kbps)");
 
@@ -250,8 +251,6 @@ pub async fn run_encoding_loop(
 
         while let Some(frame) = handle.block_on(frame_rx.recv()) {
             frames_received += 1;
-
-            // Log every 150th frame (~5s at 30fps) so we can track progress without spam
             let log_this = frames_received == 1 || frames_received % 150 == 0;
 
             let capture_w = frame.width;
@@ -264,24 +263,6 @@ pub async fn run_encoding_loop(
                 frames_skipped += 1;
                 continue;
             }
-
-            if encoder.is_none() || w != last_w || h != last_h {
-                info!("[encode] building encoder for {w}x{h} (capture={capture_w}x{capture_h} data={capture_data_len}B)");
-                match build_encoder(w, h) {
-                    Ok(e) => {
-                        info!("[encode] VP8 encoder initialised ({w}x{h})");
-                        encoder = Some(e);
-                        last_w = w;
-                        last_h = h;
-                    }
-                    Err(e) => {
-                        error!("[encode] failed to build encoder: {e}");
-                        continue;
-                    }
-                }
-            }
-
-            let enc = encoder.as_mut().unwrap();
 
             // DIAGNOSTIC: verify frame data size matches encoder dimensions
             let expected_bgra = (w as usize) * (h as usize) * 4;
@@ -298,6 +279,32 @@ pub async fn run_encoding_loop(
             }
 
             let i420 = bgra_to_i420(&frame.data, w, h);
+
+            // If a keyframe was requested (e.g. on WebRTC connect), reset the encoder.
+            // A fresh encoder always produces a keyframe on its first encode call.
+            if force_keyframe.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                info!("[encode] forced keyframe — resetting encoder");
+                last_w = 0; // trigger encoder rebuild on next iteration check
+                frame_idx = 0;
+            }
+
+            // Rebuild encoder if needed (dimensions changed or forced keyframe reset)
+            if encoder.is_none() || w != last_w || h != last_h {
+                match build_encoder(w, h) {
+                    Ok(e) => {
+                        info!("[encode] encoder (re)built ({w}x{h})");
+                        encoder = Some(e);
+                        last_w = w;
+                        last_h = h;
+                    }
+                    Err(e) => {
+                        error!("[encode] encoder build failed: {e}");
+                        continue;
+                    }
+                }
+            }
+
+            let enc = encoder.as_mut().unwrap();
             let pts_us = frame_idx * (1_000_000 / TARGET_FPS as i64);
 
             match enc.encode(pts_us, i420.as_slice()) {
