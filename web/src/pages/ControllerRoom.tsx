@@ -30,9 +30,10 @@ export default function ControllerRoom() {
   const [showConfirm, setShowConfirm] = useState(false);
   const [micMuted, setMicMuted] = useState(false);
   const [hasMic, setHasMic] = useState(false);
+  const [debugMsg, setDebugMsg] = useState("");
 
-  function log(_msg: string) {
-    // debug logging removed after fix confirmed
+  function log(msg: string) {
+    setDebugMsg(msg);
   }
 
   const joinUrl = `${window.location.origin}/join/${token ?? ""}`;
@@ -78,6 +79,7 @@ export default function ControllerRoom() {
           } catch { /* ignore stale candidates */ }
         }
         if (msg.type === "active") {
+          log("received active from desktop");
           setStatus("connected");
         }
         // CONTRACT: The server sends "terminate" to tell us the session is over.
@@ -124,19 +126,21 @@ export default function ControllerRoom() {
       }
 
       pc.ontrack = (e) => {
-        log(`ontrack: ${e.track.kind}`);
+        log(`ontrack: ${e.track.kind} readyState=${e.track.readyState}`);
 
         if (e.track.kind === "video") {
           const v = videoRef.current;
+          log(`video ref: ${v ? "exists" : "NULL"}`);
           if (v) {
-            // Build a fresh MediaStream directly from the track.
-            // Do NOT use e.streams[0] — for desktop VP8 it may be empty.
-            // Do NOT use null/reassign — it resets the decoder unnecessarily.
             v.srcObject = new MediaStream([e.track]);
             v.muted = true;
             v.play()
-              .then(() => { v.muted = false; })
-              .catch(() => {
+              .then(() => {
+                v.muted = false;
+                log("video playing OK");
+              })
+              .catch((err: unknown) => {
+                log(`play failed: ${err}`);
                 if ("ontouchstart" in window) {
                   setNeedsTap(true);
                 } else {
@@ -172,9 +176,8 @@ export default function ControllerRoom() {
       // "closed" happens when we ourselves close the PC (already cleaning up).
       // On "failed" we ask the SERVER to terminate — we do not self-terminate.
       pc.onconnectionstatechange = () => {
+        log(`conn: ${pc.connectionState}`);
         if (pc.connectionState === "failed") {
-          // Ask server to terminate. Server will broadcast terminate to all
-          // parties and we will navigate away on receiving that message.
           sig.send({ type: "terminate" });
         }
       };
@@ -563,6 +566,11 @@ export default function ControllerRoom() {
 
       {/* Remote screen */}
       <div className="flex-1 relative flex items-center justify-center bg-black">
+        {debugMsg && (
+          <div className="absolute top-2 left-2 z-50 bg-black/80 text-green-400 text-xs font-mono px-2 py-1 rounded pointer-events-none">
+            {debugMsg}
+          </div>
+        )}
         <video
           ref={videoRef}
           autoPlay
