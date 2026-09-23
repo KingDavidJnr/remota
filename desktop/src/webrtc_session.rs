@@ -224,12 +224,31 @@ const TARGET_BITRATE_KBPS: u32 = 2000;
 /// Spawns a dedicated OS thread for VP8 encoding (encoder is !Send so it cannot
 /// live in a tokio task across await points). The thread encodes frames and sends
 /// the compressed bytes to an async task via a channel which calls write_sample.
+///
+/// Encoding does not begin until `connected_rx` is true. This ensures the RTP
+/// sender is bound before any write_sample call, avoiding pre-connection errors
+/// that would otherwise accumulate and kill the write task.
 pub async fn run_encoding_loop(
     track: Arc<TrackLocalStaticSample>,
     mut frame_rx: mpsc::Receiver<CapturedFrame>,
     force_keyframe: Arc<std::sync::atomic::AtomicBool>,
+    mut connected_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     info!("[encode] encoding loop started ({TARGET_FPS} fps, {TARGET_BITRATE_KBPS} kbps)");
+
+    // Wait until the peer connection reaches Connected before consuming any frames.
+    // This prevents write_sample from being called before the RTP sender is bound.
+    if !*connected_rx.borrow() {
+        info!("[encode] waiting for WebRTC Connected before encoding…");
+        if connected_rx.changed().await.is_err() {
+            info!("[encode] connected_rx closed before Connected — exiting");
+            return;
+        }
+    }
+    // Drain any frames that accumulated while we were waiting — they are stale
+    // and would produce delta packets that cannot be decoded without a keyframe.
+    while frame_rx.try_recv().is_ok() {}
+    info!("[encode] WebRTC Connected — starting encode/write pipeline");
 
     let frame_duration = Duration::from_millis(1000 / TARGET_FPS as u64);
 
@@ -341,7 +360,13 @@ pub async fn run_encoding_loop(
         info!("[encode] encoding thread exited — frames_received={frames_received} packets_sent={packets_sent} frames_skipped={frames_skipped}");
     });
 
-    // Async write task — receives encoded bytes and writes to the WebRTC track
+    // Async write task — receives encoded bytes and writes to the WebRTC track.
+    // Errors from write_sample are logged but never cause an early exit: before
+    // the peer connection reaches Connected the RTP sender is not yet bound and
+    // write_sample returns ErrRTPSenderNotReady (or similar). Those errors are
+    // expected and harmless — the encoding thread will reset the encoder on
+    // force_keyframe anyway, so the browser always gets a clean keyframe once
+    // the connection is actually up.
     let mut write_count: u64 = 0;
     let mut write_error_count: u64 = 0;
     while let Some(data) = encoded_rx.recv().await {
@@ -352,23 +377,13 @@ pub async fn run_encoding_loop(
             duration: frame_duration,
             ..Default::default()
         };
-        // DIAGNOSTIC: log every write to track so we can confirm packets reach WebRTC
         if write_count <= 5 || write_count % 150 == 0 {
             info!("[encode] write_sample #{write_count}: {pkt_size}B → track");
         }
-        match track.write_sample(&sample).await {
-            Ok(()) => {}
-            Err(e) => {
-                write_error_count += 1;
-                if write_error_count <= 3 || write_count % 150 == 0 {
-                    error!("[encode] write_sample #{write_count} FAILED: {e}");
-                }
-                // Do NOT return on first error — track may not be bound yet
-                // Return only if we get persistent errors
-                if write_error_count > 10 {
-                    info!("[encode] write_sample failed {write_error_count} times, stopping");
-                    return;
-                }
+        if let Err(e) = track.write_sample(&sample).await {
+            write_error_count += 1;
+            if write_error_count <= 3 || write_count % 150 == 0 {
+                error!("[encode] write_sample #{write_count} FAILED: {e}");
             }
         }
     }

@@ -118,15 +118,17 @@ async fn run(ws_url: &str, token: &str) -> Result<()> {
     let stop_capture = Arc::new(AtomicBool::new(false));
     capture::start(frame_tx, Arc::clone(&stop_capture))?;
 
-    // Shared flag: main loop sets this true on WebRTC Connected,
-    // encoding thread resets the encoder to produce a keyframe immediately.
+    // Gate that the encoding loop waits on before it starts consuming frames.
+    // Set to true once WebRTC reaches Connected so that encode/write only begins
+    // after the RTP sender is bound and a post-connect keyframe has been produced.
     let force_keyframe = Arc::new(AtomicBool::new(false));
+    let (connected_tx, connected_rx) = tokio::sync::watch::channel(false);
 
     {
         let track = Arc::clone(&session.video_track);
         let kf = Arc::clone(&force_keyframe);
         tokio::spawn(async move {
-            webrtc_session::run_encoding_loop(track, frame_rx, kf).await;
+            webrtc_session::run_encoding_loop(track, frame_rx, kf, connected_rx).await;
         });
     }
 
@@ -188,12 +190,12 @@ async fn run(ws_url: &str, token: &str) -> Result<()> {
                 match state {
                     RTCPeerConnectionState::Connected => {
                         let _ = signal_tx.send(r#"{"type":"active"}"#.to_owned()).await;
-                        // Force a keyframe so the browser gets a decodable starting point.
-                        // Frames encoded before Connected are discarded by webrtc-rs
-                        // because no RTP sender is bound yet. Without this, the browser
-                        // receives only delta frames and shows a black screen.
+                        // Ungate the encoding loop: the RTP sender is now bound so
+                        // write_sample calls will succeed. Set force_keyframe first so
+                        // the very first frame the loop encodes is a keyframe.
                         force_keyframe.store(true, std::sync::atomic::Ordering::Relaxed);
-                        info!("[main] Connected — forced keyframe requested");
+                        let _ = connected_tx.send(true);
+                        info!("[main] Connected — encoding started, keyframe requested");
                         show_active_notification();
                     }
                     // "failed" is unrecoverable — send terminate REQUEST to server.
