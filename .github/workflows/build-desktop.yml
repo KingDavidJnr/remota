@@ -60,11 +60,21 @@ jobs:
           $verLine = Select-String -Path $headerFile -Pattern "VPX_VERSION_PATCH" | Select-Object -First 1
           Write-Output "Version line: $verLine"
 
+          # Get the actual version from vcpkg portfile
+          $vpxVersion = (& "$vcpkg\vcpkg.exe" list libvpx 2>&1) |
+            Select-String "libvpx:x64-windows-static" |
+            ForEach-Object { ($_ -split '\s+')[1] } |
+            Select-Object -First 1
+
+          if (-not $vpxVersion) { $vpxVersion = "1.14.0" }
+          Write-Output "libvpx version: $vpxVersion"
+
           # Use ffi-generate feature so bindgen regenerates at build time
           # This avoids the pre-generated file version mismatch entirely
           echo "VPX_LIB_DIR=$libDir" >> $env:GITHUB_ENV
           echo "VPX_INCLUDE_DIR=$includeDir" >> $env:GITHUB_ENV
           echo "VPX_STATIC=1" >> $env:GITHUB_ENV
+          echo "VPX_VERSION=$vpxVersion" >> $env:GITHUB_ENV
         shell: pwsh
 
       - name: Build release binary
