@@ -250,7 +250,15 @@ pub async fn run_encoding_loop(
             let w = frame.width;
             let h = frame.height;
 
+            // VP8 requires dimensions divisible by 2
+            let w = w & !1;
+            let h = h & !1;
+            if w == 0 || h == 0 {
+                continue;
+            }
+
             if encoder.is_none() || w != last_w || h != last_h {
+                info!("[encode] building encoder for {w}x{h}");
                 match build_encoder(w, h) {
                     Ok(e) => {
                         info!("[encode] VP8 encoder initialised ({w}x{h})");
@@ -267,19 +275,29 @@ pub async fn run_encoding_loop(
 
             let enc = encoder.as_mut().unwrap();
             let i420 = bgra_to_i420(&frame.data, w, h);
+            info!("[encode] i420 len={} expected={}", i420.len(), w as usize * h as usize * 3 / 2);
 
             match enc.encode(frame_idx, i420.as_slice()) {
                 Ok(packets) => {
+                    let mut sent = 0;
                     for pkt in packets {
                         let data = Bytes::copy_from_slice(pkt.data);
                         if !data.is_empty() {
+                            sent += 1;
                             if encoded_tx.blocking_send(data).is_err() {
-                                return; // receiver dropped — stop encoding
+                                return;
                             }
                         }
                     }
+                    if frame_idx < 3 {
+                        info!("[encode] frame {} → {} packets", frame_idx, sent);
+                    }
                 }
-                Err(e) => warn!("[encode] encode error: {e:?}"),
+                Err(e) => {
+                    if frame_idx < 5 {
+                        error!("[encode] frame {} error: {e:?}", frame_idx);
+                    }
+                }
             }
 
             frame_idx += 1;
