@@ -30,43 +30,53 @@ jobs:
           key: windows-cargo-${{ hashFiles('desktop/Cargo.lock') }}
           restore-keys: windows-cargo-
 
-      - name: Install libvpx via vcpkg and build
-        env:
-          REMOTA_WS_URL: wss://api.remota.quickdesk.tech
-          REMOTA_TURN_URL: turn:turn.remota.quickdesk.tech:3478
-          REMOTA_TURN_USER: ${{ secrets.REMOTA_TURN_USER }}
-          REMOTA_TURN_PASS: ${{ secrets.REMOTA_TURN_PASS }}
+      - name: Install libvpx via vcpkg
         run: |
           $vcpkg = $env:VCPKG_INSTALLATION_ROOT
           Write-Output "vcpkg: $vcpkg"
 
-          # Install libvpx static
           & "$vcpkg\vcpkg.exe" install "libvpx:x64-windows-static"
 
           $libDir     = "$vcpkg\installed\x64-windows-static\lib"
           $includeDir = "$vcpkg\installed\x64-windows-static\include"
 
-          Write-Output "lib dir contents:"
-          Get-ChildItem $libDir | Where-Object { $_.Name -like "*vpx*" }
-
-          # vcpkg installs vpx.lib but env-libvpx-sys links libvpx.lib on Windows.
-          # Create a copy with the expected name.
-          $vpxLib = Join-Path $libDir "vpx.lib"
-          $libvpxLib = Join-Path $libDir "libvpx.lib"
-          if ((Test-Path $vpxLib) -and -not (Test-Path $libvpxLib)) {
-            Write-Output "Copying vpx.lib -> libvpx.lib"
-            Copy-Item $vpxLib $libvpxLib
+          # Get the actual installed version
+          $portfile = "$vcpkg\installed\x64-windows-static\share\libvpx\vcpkg_abi_info.txt"
+          if (Test-Path $portfile) {
+            $ver = Get-Content $portfile | Select-Object -First 1
+            Write-Output "libvpx installed version info: $ver"
           }
 
-          Write-Output "lib dir after copy:"
-          Get-ChildItem $libDir | Where-Object { $_.Name -like "*vpx*" }
+          # vcpkg names it vpx.lib — env-libvpx-sys expects libvpx.lib on Windows
+          $vpxLib    = Join-Path $libDir "vpx.lib"
+          $libvpxLib = Join-Path $libDir "libvpx.lib"
+          if ((Test-Path $vpxLib) -and -not (Test-Path $libvpxLib)) {
+            Copy-Item $vpxLib $libvpxLib
+            Write-Output "Copied vpx.lib -> libvpx.lib"
+          }
 
-          $env:VPX_LIB_DIR     = $libDir
-          $env:VPX_INCLUDE_DIR = $includeDir
-          $env:VPX_STATIC      = "1"
-          $env:VPX_VERSION     = "1.13.0"
+          # Get the actual version number from the installed headers
+          $headerFile = "$includeDir\vpx\vpx_codec.h"
+          $verLine = Select-String -Path $headerFile -Pattern "VPX_VERSION_PATCH" | Select-Object -First 1
+          Write-Output "Version line: $verLine"
 
-          Write-Output "Building..."
+          # Use ffi-generate feature so bindgen regenerates at build time
+          # This avoids the pre-generated file version mismatch entirely
+          echo "VPX_LIB_DIR=$libDir" >> $env:GITHUB_ENV
+          echo "VPX_INCLUDE_DIR=$includeDir" >> $env:GITHUB_ENV
+          echo "VPX_STATIC=1" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Build release binary
+        env:
+          REMOTA_WS_URL: wss://api.remota.quickdesk.tech
+          REMOTA_TURN_URL: turn:turn.remota.quickdesk.tech:3478
+          REMOTA_TURN_USER: ${{ secrets.REMOTA_TURN_USER }}
+          REMOTA_TURN_PASS: ${{ secrets.REMOTA_TURN_PASS }}
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          Write-Output "VPX_LIB_DIR=$env:VPX_LIB_DIR"
+          Write-Output "VPX_INCLUDE_DIR=$env:VPX_INCLUDE_DIR"
           cargo build --release `
             --manifest-path desktop/Cargo.toml `
             --target x86_64-pc-windows-msvc
