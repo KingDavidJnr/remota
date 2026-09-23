@@ -21,6 +21,10 @@ export default function ControllerRoom() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const keyInputRef = useRef<HTMLInputElement>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
+  // Holds the incoming video track until the desktop sends "active".
+  // We defer srcObject assignment so the browser only starts decoding after
+  // the desktop has sent a fresh keyframe post-connect, preventing blank screen.
+  const pendingVideoTrackRef = useRef<MediaStreamTrack | null>(null);
 
   const [status, setStatus] = useState<"waiting" | "connecting" | "connected" | "ended">("waiting");
   const [copied, setCopied] = useState(false);
@@ -80,6 +84,30 @@ export default function ControllerRoom() {
         }
         if (msg.type === "active") {
           log("received active from desktop");
+          // Attach the video stream now that the desktop has sent its post-connect
+          // keyframe. Deferring srcObject assignment to this point ensures the
+          // browser's decoder receives a keyframe as the very first packet,
+          // preventing a blank/black screen.
+          const track = pendingVideoTrackRef.current;
+          const v = videoRef.current;
+          if (track && v) {
+            v.srcObject = new MediaStream([track]);
+            v.muted = true;
+            v.play()
+              .then(() => {
+                v.muted = false;
+                log("video playing OK");
+              })
+              .catch((err: unknown) => {
+                log(`play failed: ${err}`);
+                if ("ontouchstart" in window) {
+                  setNeedsTap(true);
+                } else {
+                  v.muted = true;
+                  v.play().then(() => { v.muted = false; }).catch(() => {});
+                }
+              });
+          }
           setStatus("connected");
         }
         // CONTRACT: The server sends "terminate" to tell us the session is over.
@@ -129,42 +157,28 @@ export default function ControllerRoom() {
         log(`ontrack: ${e.track.kind} readyState=${e.track.readyState}`);
 
         if (e.track.kind === "video") {
-          const v = videoRef.current;
-          log(`video ref: ${v ? "exists" : "NULL"}`);
-          if (v) {
-            v.srcObject = new MediaStream([e.track]);
-            v.muted = true;
-            v.play()
-              .then(() => {
-                v.muted = false;
-                log("video playing OK");
-              })
-              .catch((err: unknown) => {
-                log(`play failed: ${err}`);
-                if ("ontouchstart" in window) {
-                  setNeedsTap(true);
-                } else {
-                  v.muted = true;
-                  v.play().then(() => { v.muted = false; }).catch(() => {});
+          // Store the track — srcObject is assigned only when "active" is received
+          // from the desktop (after it has sent a post-connect keyframe).
+          // Assigning srcObject here would cause the browser to start decoding
+          // delta-only packets and display a permanent black screen.
+          pendingVideoTrackRef.current = e.track;
+          log("video track received — waiting for active signal");
+
+          // DIAGNOSTIC: poll getStats every 3s to check if browser receives RTP packets
+          const statsInterval = setInterval(async () => {
+            try {
+              const stats = await pc.getStats(e.track);
+              stats.forEach((report) => {
+                if (report.type === "inbound-rtp" && report.kind === "video") {
+                  log(`RTP: pkts=${report.packetsReceived} frames=${report.framesReceived ?? "?"} decoded=${report.framesDecoded ?? "?"} dropped=${report.framesDropped ?? "?"}`);
                 }
               });
+            } catch { /* ignore */ }
+          }, 3000);
 
-            // DIAGNOSTIC: poll getStats every 3s to check if browser receives RTP packets
-            const statsInterval = setInterval(async () => {
-              try {
-                const stats = await pc.getStats(e.track);
-                stats.forEach((report) => {
-                  if (report.type === "inbound-rtp" && report.kind === "video") {
-                    log(`RTP: pkts=${report.packetsReceived} frames=${report.framesReceived ?? "?"} decoded=${report.framesDecoded ?? "?"} dropped=${report.framesDropped ?? "?"}`);
-                  }
-                });
-              } catch { /* ignore */ }
-            }, 3000);
+          // Stop polling after 30s
+          setTimeout(() => clearInterval(statsInterval), 30000);
 
-            // Stop polling after 30s
-            setTimeout(() => clearInterval(statsInterval), 30000);
-          }
-          setStatus("connected");
           setTimeout(() => {
             if (dcRef.current?.readyState !== "open") setViewOnly(true);
           }, 3000);
@@ -209,6 +223,7 @@ export default function ControllerRoom() {
       clearSession();
       micTrackRef.current?.stop();
       micTrackRef.current = null;
+      pendingVideoTrackRef.current = null;
       sig.close();
       pc?.close();
     }
