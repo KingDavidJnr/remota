@@ -191,15 +191,6 @@ export default function ControllerRoom() {
         }
       };
 
-      // Handle renegotiation (e.g. when mic unmuted after connection)
-      pc.onnegotiationneeded = async () => {
-        try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          sig.send({ type: "offer", sdp: pc.localDescription });
-        } catch { /* ignore if PC is closing */ }
-      };
-
       // CONTRACT: Only WebRTC "failed" is unrecoverable.
       // "disconnected" is transient — do NOT terminate on it.
       // "closed" happens when we ourselves close the PC (already cleaning up).
