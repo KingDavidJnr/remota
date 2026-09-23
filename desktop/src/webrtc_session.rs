@@ -275,9 +275,11 @@ pub async fn run_encoding_loop(
 
             let enc = encoder.as_mut().unwrap();
             let i420 = bgra_to_i420(&frame.data, w, h);
-            info!("[encode] i420 len={} expected={}", i420.len(), w as usize * h as usize * 3 / 2);
 
-            match enc.encode(frame_idx, i420.as_slice()) {
+            // pts in microseconds (timebase is 1/1_000_000)
+            let pts_us = frame_idx * (1_000_000 / TARGET_FPS as i64);
+
+            match enc.encode(pts_us, i420.as_slice()) {
                 Ok(packets) => {
                     let mut sent = 0;
                     for pkt in packets {
@@ -325,7 +327,10 @@ fn build_encoder(width: u32, height: u32) -> Result<Encoder, VpxError> {
     let cfg = Config {
         width,
         height,
-        timebase: [1, TARGET_FPS as i32],
+        // Use microsecond timebase (1/1000000) — this is the libvpx default
+        // and is known to work. timebase [1, 30] causes VPX_CODEC_INVALID_PARAM
+        // with libvpx 1.14 on Windows.
+        timebase: [1, 1_000_000],
         bitrate: TARGET_BITRATE_KBPS,
         codec: VideoCodecId::VP8,
     };
