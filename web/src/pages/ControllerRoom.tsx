@@ -148,6 +148,21 @@ export default function ControllerRoom() {
                   v.play().then(() => { v.muted = false; }).catch(() => {});
                 }
               });
+
+            // DIAGNOSTIC: poll getStats every 3s to check if browser receives RTP packets
+            const statsInterval = setInterval(async () => {
+              try {
+                const stats = await pc.getStats(e.track);
+                stats.forEach((report) => {
+                  if (report.type === "inbound-rtp" && report.kind === "video") {
+                    log(`RTP: pkts=${report.packetsReceived} frames=${report.framesReceived ?? "?"} decoded=${report.framesDecoded ?? "?"} dropped=${report.framesDropped ?? "?"}`);
+                  }
+                });
+              } catch { /* ignore */ }
+            }, 3000);
+
+            // Stop polling after 30s
+            setTimeout(() => clearInterval(statsInterval), 30000);
           }
           setStatus("connected");
           setTimeout(() => {

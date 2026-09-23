@@ -236,29 +236,37 @@ pub async fn run_encoding_loop(
     let (encoded_tx, mut encoded_rx) = mpsc::channel::<Bytes>(8);
 
     // Capture the tokio runtime handle before entering the std thread
-    // so we can use block_on to drive async receives from within the OS thread.
     let handle = tokio::runtime::Handle::current();
 
-    // Encoding thread — owns the !Send Encoder entirely within one OS thread
+    // Encoding thread
     std::thread::spawn(move || {
         let mut encoder: Option<Encoder> = None;
         let mut last_w: u32 = 0;
         let mut last_h: u32 = 0;
         let mut frame_idx: i64 = 0;
+        let mut frames_received: u64 = 0;
+        let mut packets_sent: u64 = 0;
+        let mut frames_skipped: u64 = 0;
 
         while let Some(frame) = handle.block_on(frame_rx.recv()) {
-            let w = frame.width;
-            let h = frame.height;
+            frames_received += 1;
 
-            // VP8 requires dimensions divisible by 2
-            let w = w & !1;
-            let h = h & !1;
+            // Log every 150th frame (~5s at 30fps) so we can track progress without spam
+            let log_this = frames_received == 1 || frames_received % 150 == 0;
+
+            let capture_w = frame.width;
+            let capture_h = frame.height;
+            let capture_data_len = frame.data.len();
+
+            let w = capture_w & !1;
+            let h = capture_h & !1;
             if w == 0 || h == 0 {
+                frames_skipped += 1;
                 continue;
             }
 
             if encoder.is_none() || w != last_w || h != last_h {
-                info!("[encode] building encoder for {w}x{h}");
+                info!("[encode] building encoder for {w}x{h} (capture={capture_w}x{capture_h} data={capture_data_len}B)");
                 match build_encoder(w, h) {
                     Ok(e) => {
                         info!("[encode] VP8 encoder initialised ({w}x{h})");
@@ -275,60 +283,90 @@ pub async fn run_encoding_loop(
 
             let enc = encoder.as_mut().unwrap();
 
-            // Guard: skip empty frames (can happen on first capture callback)
-            let expected = (w as usize) * (h as usize) * 4;
-            if frame.data.len() < expected {
-                warn!("[encode] frame data too small: {} < {expected}", frame.data.len());
+            // DIAGNOSTIC: verify frame data size matches encoder dimensions
+            let expected_bgra = (w as usize) * (h as usize) * 4;
+            if frame.data.len() < expected_bgra {
+                frames_skipped += 1;
+                if log_this {
+                    warn!("[encode] SKIP frame {frames_received}: data={capture_data_len}B expected={expected_bgra}B (capture={capture_w}x{capture_h} encoder={w}x{h})");
+                }
                 continue;
             }
 
-            let i420 = bgra_to_i420(&frame.data, w, h);
+            if log_this {
+                info!("[encode] frame {frames_received}: capture={capture_w}x{capture_h} encoder={w}x{h} data={capture_data_len}B expected={expected_bgra}B packets_sent_so_far={packets_sent}");
+            }
 
-            // pts in microseconds (timebase is 1/1_000_000)
+            let i420 = bgra_to_i420(&frame.data, w, h);
             let pts_us = frame_idx * (1_000_000 / TARGET_FPS as i64);
 
             match enc.encode(pts_us, i420.as_slice()) {
                 Ok(packets) => {
-                    let mut sent = 0;
+                    let mut pkt_count = 0;
                     for pkt in packets {
                         let data = Bytes::copy_from_slice(pkt.data);
                         if !data.is_empty() {
-                            sent += 1;
+                            pkt_count += 1;
+                            packets_sent += 1;
+                            // DIAGNOSTIC: log first few packet sizes to confirm data
+                            if packets_sent <= 3 {
+                                info!("[encode] PACKET {packets_sent}: {} bytes (key={})", data.len(), pkt.key);
+                            }
                             if encoded_tx.blocking_send(data).is_err() {
+                                info!("[encode] encoded_tx channel closed — receiver dropped");
                                 return;
                             }
                         }
                     }
-                    if frame_idx < 3 {
-                        info!("[encode] frame {} → {} packets", frame_idx, sent);
+                    if pkt_count == 0 && log_this {
+                        info!("[encode] frame {frames_received} → 0 packets (encoder buffering)");
                     }
                 }
                 Err(e) => {
-                    if frame_idx < 5 {
-                        error!("[encode] frame {} error: {e:?}", frame_idx);
+                    if frame_idx < 5 || log_this {
+                        error!("[encode] frame {frames_received} encode error: {e:?}");
                     }
                 }
             }
 
             frame_idx += 1;
         }
-        info!("[encode] encoding thread exited");
+        info!("[encode] encoding thread exited — frames_received={frames_received} packets_sent={packets_sent} frames_skipped={frames_skipped}");
     });
 
     // Async write task — receives encoded bytes and writes to the WebRTC track
+    let mut write_count: u64 = 0;
+    let mut write_error_count: u64 = 0;
     while let Some(data) = encoded_rx.recv().await {
+        write_count += 1;
+        let pkt_size = data.len();
         let sample = Sample {
             data,
             duration: frame_duration,
             ..Default::default()
         };
-        if let Err(e) = track.write_sample(&sample).await {
-            info!("[encode] write_sample ended: {e}");
-            return;
+        // DIAGNOSTIC: log every write to track so we can confirm packets reach WebRTC
+        if write_count <= 5 || write_count % 150 == 0 {
+            info!("[encode] write_sample #{write_count}: {pkt_size}B → track");
+        }
+        match track.write_sample(&sample).await {
+            Ok(()) => {}
+            Err(e) => {
+                write_error_count += 1;
+                if write_error_count <= 3 || write_count % 150 == 0 {
+                    error!("[encode] write_sample #{write_count} FAILED: {e}");
+                }
+                // Do NOT return on first error — track may not be bound yet
+                // Return only if we get persistent errors
+                if write_error_count > 10 {
+                    info!("[encode] write_sample failed {write_error_count} times, stopping");
+                    return;
+                }
+            }
         }
     }
 
-    info!("[encode] encoding loop exited");
+    info!("[encode] encoding loop exited — write_count={write_count} write_error_count={write_error_count}");
 }
 
 fn build_encoder(width: u32, height: u32) -> Result<Encoder, VpxError> {
