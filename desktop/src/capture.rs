@@ -84,9 +84,19 @@ mod platform {
             let height = frame.height();
             let mut packed = Vec::with_capacity((width * height * 4) as usize);
             let buf = frame.buffer()?;
-            buf.as_nopadding_buffer(&mut packed);
+            let data = buf.as_nopadding_buffer(&mut packed);
 
-            if self.frame_tx.try_send(CapturedFrame { data: packed, width, height }).is_err()
+            if data.is_empty() {
+                return Ok(());
+            }
+
+            let cf = CapturedFrame {
+                data: data.to_vec(),
+                width,
+                height,
+            };
+
+            if self.frame_tx.try_send(cf).is_err()
                 && self.frame_tx.is_closed()
             {
                 ctl.stop();

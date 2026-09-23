@@ -274,6 +274,14 @@ pub async fn run_encoding_loop(
             }
 
             let enc = encoder.as_mut().unwrap();
+
+            // Guard: skip empty frames (can happen on first capture callback)
+            let expected = (w as usize) * (h as usize) * 4;
+            if frame.data.len() < expected {
+                warn!("[encode] frame data too small: {} < {expected}", frame.data.len());
+                continue;
+            }
+
             let i420 = bgra_to_i420(&frame.data, w, h);
 
             // pts in microseconds (timebase is 1/1_000_000)
