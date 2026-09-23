@@ -176,13 +176,11 @@ impl Session {
     pub async fn handle_offer(&self, sdp: &str) -> Result<RTCSessionDescription> {
         let offer = RTCSessionDescription::offer(sdp.to_owned())
             .context("parse offer SDP")?;
+
+        info!("[webrtc] offer SDP:\n{}", sdp);
+
         self.pc.set_remote_description(offer).await?;
 
-        // Add the video track AFTER set_remote_description so the transceiver
-        // created by the offer's recvonly video m-line is matched correctly.
-        // Adding the track before set_remote_description means webrtc-rs creates
-        // a new sendrecv transceiver instead of reusing the offer's recvonly slot,
-        // causing the browser's ontrack to never fire.
         self.pc
             .add_track(Arc::clone(&self.video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await
@@ -193,10 +191,14 @@ impl Session {
         self.pc.set_local_description(answer).await?;
         let _ = gather_complete.recv().await;
 
-        self.pc
+        let local = self.pc
             .local_description()
             .await
-            .context("no local description after gathering")
+            .context("no local description after gathering")?;
+
+        info!("[webrtc] answer SDP:\n{}", local.sdp);
+
+        Ok(local)
     }
 
     pub async fn add_ice_candidate(&self, candidate_json: &str) -> Result<()> {

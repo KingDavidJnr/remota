@@ -1,8 +1,8 @@
 // ── Remota Desktop Endpoint ───────────────────────────────────────────────────
 // Windows native application.
-// Runs without a console window — status shown via Windows notifications.
+// Console window enabled temporarily for SDP debugging.
 
-#![windows_subsystem = "windows"]
+// #![windows_subsystem = "windows"]  // re-enable after debugging
 //
 // The user does not need to configure anything. The server URL and TURN
 // credentials are baked into the binary at build time.
