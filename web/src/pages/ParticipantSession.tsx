@@ -32,19 +32,19 @@ export default function ParticipantSession() {
 
     async function watch() {
       await sig.connect();
+      // Join as observer so the server can send us terminate when the session ends
+      sig.send({ type: "join", token, role: "observer" } as Record<string, unknown> & { type: string });
 
       sig.onMessage((msg) => {
         if (msg.type === "active") {
           setStatus("active");
         }
-        // CONTRACT: Only navigate on server's terminate
         if (msg.type === "terminate") {
           clearSession();
           setStatus("ended");
           setTimeout(() => navigate("/"), 2000);
         }
       });
-      // Do NOT register sig.onClose — server grace period handles disconnects
     }
 
     void watch();

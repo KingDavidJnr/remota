@@ -15,7 +15,7 @@ import prisma from "../lib/prisma";
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
-type Role = "controller" | "participant";
+type Role = "controller" | "participant" | "observer";
 
 interface RoomClient {
   ws: WebSocket & { isAlive?: boolean };
@@ -173,7 +173,7 @@ export function createSignalingServer(httpServer: Server) {
         const token = msg.token as string;
         const role = msg.role as Role;
 
-        if (!token || !["controller", "participant"].includes(role)) {
+        if (!token || !["controller", "participant", "observer"].includes(role)) {
           send(ws, { type: "error", message: "Invalid join payload" });
           return;
         }
@@ -201,10 +201,13 @@ export function createSignalingServer(httpServer: Server) {
         }
 
         // Prevent duplicate roles
-        const existing = getClientByRole(token, role);
-        if (existing) {
-          send(ws, { type: "error", message: `A ${role} is already connected` });
-          return;
+        // Observers can have multiple instances; controller/participant are unique
+        if (role !== "observer") {
+          const existing = getClientByRole(token, role);
+          if (existing) {
+            send(ws, { type: "error", message: `A ${role} is already connected` });
+            return;
+          }
         }
 
         // Cancel any grace timer for this role rejoining
@@ -311,17 +314,17 @@ export function createSignalingServer(httpServer: Server) {
 
       room.delete(clientId);
 
-      // Start a grace period. If the client reconnects and rejoins within
-      // 10 seconds, the timer is cancelled (see join handler above).
+      // Observers disconnecting do not affect the room
+      if (role === "observer") return;
+
+      // Start a grace period for controller/participant.
+      // If the client reconnects within 10s, the timer is cancelled.
       // If not, the server terminates the room.
-      // We key the timer by token:role so rejoining the same role cancels it.
       const timerKey = `${token}:${role}`;
       const timer = setTimeout(async () => {
         graceTimers.delete(timerKey);
-        // Check if the role has been filled again by a reconnect
         const rejoined = getClientByRole(token, role);
         if (!rejoined) {
-          // The client did not reconnect — server terminates the room
           await terminateRoom(token);
         }
       }, 10_000);

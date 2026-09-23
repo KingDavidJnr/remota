@@ -124,48 +124,32 @@ export default function ControllerRoom() {
       }
 
       pc.ontrack = (e) => {
-        log(`ontrack: ${e.track.kind} streams=${e.streams.length}`);
-        const stream = e.streams[0] ?? new MediaStream([e.track]);
+        log(`ontrack: ${e.track.kind}`);
 
-        // Re-attach on every track event to handle renegotiation
-        const attachStream = () => {
+        if (e.track.kind === "video") {
           const v = videoRef.current;
-          if (!v) return;
-          v.srcObject = null;
-          v.srcObject = stream;
-          // Do NOT call v.load() — it resets the decoder for live streams
-          v.play()
-            .then(() => {
-              v.muted = false;
-            })
-            .catch((err) => {
-              log(`autoplay blocked: ${err}`);
-              if ("ontouchstart" in window) {
-                setNeedsTap(true);
-              } else {
-                v.muted = true;
-                v.play().then(() => { v.muted = false; }).catch(() => {});
-              }
-            });
-        };
-
-        attachStream();
-        setStatus("connected");
-
-        // Re-attach once more after a short delay — fixes black frame on
-        // some mobile Chrome versions where the decoder initialises late
-        setTimeout(() => {
-          if (videoRef.current?.readyState === 0) {
-            log("re-attaching stream (readyState=0)");
-            attachStream();
+          if (v) {
+            // Build a fresh MediaStream directly from the track.
+            // Do NOT use e.streams[0] — for desktop VP8 it may be empty.
+            // Do NOT use null/reassign — it resets the decoder unnecessarily.
+            v.srcObject = new MediaStream([e.track]);
+            v.muted = true;
+            v.play()
+              .then(() => { v.muted = false; })
+              .catch(() => {
+                if ("ontouchstart" in window) {
+                  setNeedsTap(true);
+                } else {
+                  v.muted = true;
+                  v.play().then(() => { v.muted = false; }).catch(() => {});
+                }
+              });
           }
-        }, 1000);
-
-        setTimeout(() => {
-          if (dcRef.current?.readyState !== "open") {
-            setViewOnly(true);
-          }
-        }, 3000);
+          setStatus("connected");
+          setTimeout(() => {
+            if (dcRef.current?.readyState !== "open") setViewOnly(true);
+          }, 3000);
+        }
       };
 
       pc.onicecandidate = (e) => {
