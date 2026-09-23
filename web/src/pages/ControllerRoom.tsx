@@ -25,6 +25,10 @@ export default function ControllerRoom() {
   // We defer srcObject assignment so the browser only starts decoding after
   // the desktop has sent a fresh keyframe post-connect, preventing blank screen.
   const pendingVideoTrackRef = useRef<MediaStreamTrack | null>(null);
+  // Set to true when the "active" signal is received from the desktop.
+  // A separate useEffect watches this + videoRef to assign srcObject once
+  // both the track and the DOM video element are available.
+  const [videoReady, setVideoReady] = useState(false);
 
   const [status, setStatus] = useState<"waiting" | "connecting" | "connected" | "ended">("waiting");
   const [copied, setCopied] = useState(false);
@@ -84,30 +88,13 @@ export default function ControllerRoom() {
         }
         if (msg.type === "active") {
           log("received active from desktop");
-          // Attach the video stream now that the desktop has sent its post-connect
-          // keyframe. Deferring srcObject assignment to this point ensures the
-          // browser's decoder receives a keyframe as the very first packet,
-          // preventing a blank/black screen.
-          const track = pendingVideoTrackRef.current;
-          const v = videoRef.current;
-          if (track && v) {
-            v.srcObject = new MediaStream([track]);
-            v.muted = true;
-            v.play()
-              .then(() => {
-                v.muted = false;
-                log("video playing OK");
-              })
-              .catch((err: unknown) => {
-                log(`play failed: ${err}`);
-                if ("ontouchstart" in window) {
-                  setNeedsTap(true);
-                } else {
-                  v.muted = true;
-                  v.play().then(() => { v.muted = false; }).catch(() => {});
-                }
-              });
-          }
+          // Signal that the video stream is ready to play. A separate useEffect
+          // watches videoReady + videoRef so that srcObject is assigned only after
+          // the <video> element is mounted in the DOM (which happens on status →
+          // "connected" re-render). Attempting to use videoRef.current here would
+          // fail because the element doesn't exist in the DOM until after
+          // setStatus("connected") triggers a re-render.
+          setVideoReady(true);
           setStatus("connected");
         }
         // CONTRACT: The server sends "terminate" to tell us the session is over.
@@ -215,10 +202,41 @@ export default function ControllerRoom() {
       micTrackRef.current?.stop();
       micTrackRef.current = null;
       pendingVideoTrackRef.current = null;
+      setVideoReady(false);
       sig.close();
       pc?.close();
     }
   }, [token, navigate]);
+
+  // ── Attach video stream once the DOM element is mounted and stream is ready ──
+  // The "active" signal sets videoReady=true and status="connected". The status
+  // change causes the <video> element to appear in the DOM. This effect runs
+  // after that re-render, so videoRef.current is guaranteed to be non-null.
+  useEffect(() => {
+    if (!videoReady) return;
+    const v = videoRef.current;
+    const track = pendingVideoTrackRef.current;
+    if (!v || !track) {
+      log(`video attach skipped: v=${v ? "ok" : "null"} track=${track ? "ok" : "null"}`);
+      return;
+    }
+    v.srcObject = new MediaStream([track]);
+    v.muted = true;
+    v.play()
+      .then(() => {
+        v.muted = false;
+        log("video playing OK");
+      })
+      .catch((err: unknown) => {
+        log(`play failed: ${err}`);
+        if ("ontouchstart" in window) {
+          setNeedsTap(true);
+        } else {
+          v.muted = true;
+          v.play().then(() => { v.muted = false; }).catch(() => {});
+        }
+      });
+  }, [videoReady]);
 
   // ── Mic toggle ────────────────────────────────────────────────────────────
   function handleMicToggle() {
