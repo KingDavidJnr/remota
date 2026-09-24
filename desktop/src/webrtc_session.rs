@@ -200,9 +200,10 @@ impl Session {
         // write RTCP feedback into the sender's read buffer. If it is never read,
         // the buffer fills and back-pressures the entire RTP pipeline causing the
         // video to freeze. This task runs for the lifetime of the sender.
+        let sender_rtcp = Arc::clone(&sender);
         tokio::spawn(async move {
             let mut rtcp_buf = vec![0u8; 1500];
-            while sender.read(&mut rtcp_buf).await.is_ok() {}
+            while sender_rtcp.read(&mut rtcp_buf).await.is_ok() {}
         });
 
         let answer = self.pc.create_answer(None).await?;
