@@ -32,6 +32,9 @@ export default function ControllerRoom() {
   const [showConfirm, setShowConfirm] = useState(false);
   const [micMuted, setMicMuted] = useState(false);
   const [hasMic, setHasMic] = useState(false);
+  const [debugMsg, setDebugMsg] = useState("");
+
+  function log(msg: string) { setDebugMsg(msg); }
   const joinUrl = `${window.location.origin}/join/${token ?? ""}`;
 
   // ── Touch gesture state (refs so handlers don't stale-close over them) ──────
@@ -67,7 +70,9 @@ export default function ControllerRoom() {
             await pcRef.current?.setRemoteDescription(
               new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
             );
+            log("setRemoteDescription OK");
           } catch (e) {
+            log(`setRemoteDescription FAILED: ${e}`);
             console.error("[remota] setRemoteDescription failed:", e);
           }
         }
@@ -79,6 +84,7 @@ export default function ControllerRoom() {
           } catch { /* ignore stale candidates */ }
         }
         if (msg.type === "active") {
+          log("active received — attaching video");
           setStatus("connected");
           // Defer srcObject assignment until after React re-renders the
           // <video> element (which only appears when status==="connected").
@@ -88,9 +94,9 @@ export default function ControllerRoom() {
             if (!v || !track || videoAttachedRef.current) return;
             videoAttachedRef.current = true;
             v.srcObject = new MediaStream([track]);
-            v.play().catch(() => {
-              setNeedsTap(true);
-            });
+            v.play()
+              .then(() => log("video playing OK"))
+              .catch(() => { setNeedsTap(true); });
           });
         }
         // CONTRACT: The server sends "terminate" to tell us the session is over.
@@ -137,6 +143,7 @@ export default function ControllerRoom() {
       }
 
       pc.ontrack = (e) => {
+        log(`ontrack: ${e.track.kind} readyState=${e.track.readyState}`);
         if (e.track.kind === "video") {
           pendingVideoTrackRef.current = e.track;
           setTimeout(() => {
@@ -547,6 +554,11 @@ export default function ControllerRoom() {
 
       {/* Remote screen */}
       <div className="flex-1 relative flex items-center justify-center bg-black">
+        {debugMsg && (
+          <div className="absolute top-2 left-2 z-50 bg-black/80 text-green-400 text-xs font-mono px-2 py-1 rounded pointer-events-none">
+            {debugMsg}
+          </div>
+        )}
         <video
           ref={videoRef}
           autoPlay
