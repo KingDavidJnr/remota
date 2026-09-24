@@ -22,13 +22,21 @@ futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Mouse / keyboard injection (cross-platform)
+# Mouse / keyboard injection (participant side)
 enigo = "0.2"
 
-# VP8 video encoding (BGRA → I420 → VP8)
-# ffi-generate regenerates bindings at build time from installed headers,
-# avoiding the pre-generated file version mismatch with libvpx 1.14
+# VP8 video encoding (participant side: BGRA → I420 → VP8)
 vpx-encode = { version = "0.6", features = ["ffi-generate"] }
+
+# VP8 video decoding (controller side: RTP → VP8 → I420 → BGRA)
+env-libvpx-sys = "5.1"
+
+# Window rendering (controller side)
+winit = "0.30"
+softbuffer = "0.4"
+
+# HTTP client for room creation (controller side)
+ureq = { version = "2", features = ["native-tls"] }
 
 # Utilities
 anyhow = "1"

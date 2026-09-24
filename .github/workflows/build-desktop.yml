@@ -80,6 +80,7 @@ jobs:
       - name: Build release binary
         env:
           REMOTA_WS_URL: wss://api.remota.quickdesk.tech
+          REMOTA_WEB_URL: https://remota.quickdesk.tech
           REMOTA_TURN_URL: turn:turn.remota.quickdesk.tech:3478
           REMOTA_TURN_USER: ${{ secrets.REMOTA_TURN_USER }}
           REMOTA_TURN_PASS: ${{ secrets.REMOTA_TURN_PASS }}

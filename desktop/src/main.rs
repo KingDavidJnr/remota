@@ -1,25 +1,17 @@
 // ── Remota Desktop Endpoint ───────────────────────────────────────────────────
 // Windows native application.
-// Console window enabled temporarily for SDP debugging.
+//
+// Modes:
+//   Participant (default): remota-desktop.exe [token | remota://session/<token>]
+//   Controller:            remota-desktop.exe --controller  (or -c)
+//
+// The WS URL and TURN credentials are baked into the binary at build time.
 
 // #![windows_subsystem = "windows"]  // re-enable after debugging
-//
-// The user does not need to configure anything. The server URL and TURN
-// credentials are baked into the binary at build time.
-//
-// Invocation modes (in order of priority):
-//
-//   1. Deep-link — browser clicks "Launch Remota Desktop":
-//        remota-desktop.exe remota://session/<token>
-//
-//   2. Manual token entry — user runs the exe and is prompted:
-//        remota-desktop.exe <token>
-//
-// On first run the app registers the remota:// URI scheme in HKCU so that
-// subsequent deep-link clicks open this executable automatically.
 
 mod capture;
 mod config;
+mod controller;
 mod input;
 mod protocol;
 mod register;
@@ -54,24 +46,28 @@ async fn main() -> Result<()> {
         tracing::warn!("[main] protocol handler registration failed: {e}");
     }
 
-    // ── Resolve token ─────────────────────────────────────────────────────────
-    // The WS URL is always baked in. The token comes from:
-    //   a) the deep-link URI passed as arg 1
-    //   b) a plain token passed as arg 1
-    //   c) prompted interactively if no args given
     let args: Vec<String> = std::env::args().collect();
+
+    // ── Controller mode ───────────────────────────────────────────────────────
+    if args.get(1).map(|a| a == "--controller" || a == "-c").unwrap_or(false) {
+        info!("Starting in controller mode");
+        return controller::run_controller().await;
+    }
+
+    // ── Participant mode (default) ────────────────────────────────────────────
+    // The WS URL is always baked in. The token comes from:
+    //   a) deep-link URI: remota://session/<token>
+    //   b) plain token as arg 1
+    //   c) interactive stdin prompt
     let token = match args.get(1) {
         Some(arg) => {
-            // Try to parse as a deep-link URI first
             if let Some(t) = register::parse_deep_link(arg) {
                 t
             } else {
-                // Treat bare arg as a token directly
                 arg.clone()
             }
         }
         None => {
-            // No argument — prompt the user to paste the token
             print!("Enter session token: ");
             io::stdout().flush().ok();
             let mut line = String::new();

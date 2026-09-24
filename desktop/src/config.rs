@@ -5,6 +5,7 @@
 // Build-time variables (set in your shell or CI before `cargo build --release`):
 //
 //   REMOTA_WS_URL       wss://api.remota.quickdesk.tech        (required)
+//   REMOTA_WEB_URL      https://remota.quickdesk.tech          (optional, for controller join URL)
 //   REMOTA_TURN_URL     turn:turn.remota.quickdesk.tech:3478   (optional)
 //   REMOTA_TURN_USER    <coturn username>                       (optional)
 //   REMOTA_TURN_PASS    <coturn credential>                     (optional)
@@ -12,6 +13,10 @@
 /// WebSocket base URL of the Remota backend.
 /// e.g. "wss://api.remota.quickdesk.tech"
 pub const WS_URL: &str = env!("REMOTA_WS_URL");
+
+/// Web frontend base URL (used by controller mode to print the join link).
+/// e.g. "https://remota.quickdesk.tech"
+pub const WEB_URL: Option<&str> = option_env!("REMOTA_WEB_URL");
 
 /// TURN server URL, if configured at build time.
 pub const TURN_URL: Option<&str> = option_env!("REMOTA_TURN_URL");

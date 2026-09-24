@@ -166,6 +166,116 @@ pub fn make_answer_msg(sdp_obj: &webrtc::peer_connection::sdp::session_descripti
     Ok(msg.to_string())
 }
 
+// ── Controller signaling ──────────────────────────────────────────────────────
+
+use crate::controller::ControllerSignalEvent;
+
+/// Connect to signaling as the controller role.
+pub async fn connect_as_controller(
+    ws_url: &str,
+    token: &str,
+) -> Result<(mpsc::Receiver<ControllerSignalEvent>, mpsc::Sender<String>)> {
+    let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url).await?;
+    info!("[signaling] controller connected to {ws_url}");
+
+    let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+    let join_msg = serde_json::to_string(&JoinMsg {
+        kind: "join",
+        token,
+        role: "controller",
+    })?;
+    ws_tx.send(Message::Text(join_msg.into())).await?;
+    info!("[signaling] controller joined token={token}");
+
+    let (event_tx, event_rx) = mpsc::channel::<ControllerSignalEvent>(32);
+    let (out_tx, mut out_rx) = mpsc::channel::<String>(32);
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                msg = ws_rx.next() => {
+                    match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            handle_controller_inbound(text.as_str(), &event_tx).await;
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => {
+                            error!("[signaling] controller recv error: {e}");
+                            let _ = event_tx.send(ControllerSignalEvent::Disconnected).await;
+                            break;
+                        }
+                        None => {
+                            let _ = event_tx.send(ControllerSignalEvent::Disconnected).await;
+                            break;
+                        }
+                    }
+                }
+                Some(text) = out_rx.recv() => {
+                    if let Err(e) = ws_tx.send(Message::Text(text.into())).await {
+                        error!("[signaling] controller send error: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    Ok((event_rx, out_tx))
+}
+
+async fn handle_controller_inbound(text: &str, tx: &mpsc::Sender<ControllerSignalEvent>) {
+    let v: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) => { warn!("[signaling] invalid JSON: {e}"); return; }
+    };
+
+    let kind = v["type"].as_str().unwrap_or("");
+    debug!("[signaling] controller ← {kind}");
+
+    match kind {
+        "participant_joined" => {
+            let _ = tx.send(ControllerSignalEvent::ParticipantJoined).await;
+        }
+        "answer" => {
+            let sdp_str = if let Some(sdp_val) = v.get("sdp") {
+                if sdp_val.is_object() {
+                    sdp_val["sdp"].as_str().unwrap_or("").to_owned()
+                } else {
+                    sdp_val.as_str().unwrap_or("").to_owned()
+                }
+            } else { return; };
+            let _ = tx.send(ControllerSignalEvent::Answer(sdp_str)).await;
+        }
+        "ice_candidate" => {
+            if let Some(c) = v.get("candidate") {
+                let _ = tx.send(ControllerSignalEvent::IceCandidate(c.to_string())).await;
+            }
+        }
+        "terminate" => {
+            let _ = tx.send(ControllerSignalEvent::Terminate).await;
+        }
+        _ => {}
+    }
+}
+
+pub fn make_controller_offer_msg(
+    sdp_obj: &webrtc::peer_connection::sdp::session_description::RTCSessionDescription,
+) -> Result<String> {
+    let msg = serde_json::json!({
+        "type": "offer",
+        "sdp": { "type": "offer", "sdp": sdp_obj.sdp }
+    });
+    Ok(msg.to_string())
+}
+
+pub fn make_controller_ice_msg(candidate_json: &str) -> Result<String> {
+    let c: Value = serde_json::from_str(candidate_json)
+        .unwrap_or(Value::String(candidate_json.to_owned()));
+    let msg = serde_json::json!({ "type": "ice_candidate", "candidate": c });
+    Ok(msg.to_string())
+}
+
 pub fn make_ice_msg(candidate_json: &str) -> Result<String> {
     let c: Value = serde_json::from_str(candidate_json)
         .unwrap_or(Value::String(candidate_json.to_owned()));
