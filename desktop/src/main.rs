@@ -2,7 +2,9 @@
 // Single-window native application.
 // All modes (home, controller, participant) run in one eframe window.
 
-#![windows_subsystem = "windows"]
+// In release builds, suppress the console window. In debug builds, keep it so
+// that tracing logs are visible for diagnosis.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod capture;
 mod config;
@@ -23,7 +25,8 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("remota_desktop=info".parse().unwrap()),
+                .add_directive("remota_desktop=debug".parse().unwrap())
+                .add_directive("webrtc=debug".parse().unwrap()),
         )
         .init();
 

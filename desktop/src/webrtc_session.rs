@@ -125,14 +125,14 @@ impl Session {
                 let ctrl = ctrl.clone();
                 Box::pin(async move {
                     info!("[webrtc] DataChannel '{}' received", dc.label());
-                    // Clone dc into the on_open closure so the Arc stays alive
-                    // for the lifetime of the channel. Dropping dc here would
-                    // close the channel before any messages arrive.
-                    let dc_open = Arc::clone(&dc);
+
+                    // Register on_open — dc_held keeps the Arc alive inside
+                    // the closure so the channel is not torn down before open.
+                    let dc_held = Arc::clone(&dc);
                     dc.on_open(Box::new(move || {
                         let ctrl = ctrl.clone();
-                        let dc_msg = Arc::clone(&dc_open);
-                        info!("[webrtc] DataChannel '{}' open — registering message handler", dc_msg.label());
+                        let dc_msg = Arc::clone(&dc_held);
+                        info!("[webrtc] DataChannel '{}' open", dc_msg.label());
                         dc_msg.on_message(Box::new(move |msg| {
                             let ctrl = ctrl.clone();
                             let data = msg.data.clone();
@@ -145,6 +145,18 @@ impl Session {
                         }));
                         Box::pin(async {})
                     }));
+
+                    // Keep dc alive until close via a Notify. Without this the
+                    // Arc drops at end of this block and webrtc-rs closes the
+                    // channel before on_open ever fires.
+                    let close_notify = Arc::new(tokio::sync::Notify::new());
+                    let cn = Arc::clone(&close_notify);
+                    dc.on_close(Box::new(move || {
+                        cn.notify_one();
+                        Box::pin(async {})
+                    }));
+                    close_notify.notified().await;
+                    info!("[webrtc] DataChannel '{}' closed", dc.label());
                 })
             }));
         }

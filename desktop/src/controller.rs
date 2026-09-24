@@ -183,8 +183,10 @@ pub async fn run_controller_async(
       pc.on_ice_candidate(Box::new(move |c| { let ice = ice.clone();
         Box::pin(async move {
             if let Some(c) = c {
-                if let (Ok(init), Ok(s)) = (c.to_json(), serde_json::to_string(&c.to_json().unwrap_or_default())) {
-                    let _ = ice.send(serde_json::to_string(&init).unwrap_or(s)).await;
+                if let Ok(init) = c.to_json() {
+                    if let Ok(s) = serde_json::to_string(&init) {
+                        let _ = ice.send(s).await;
+                    }
                 }
             }
         })
