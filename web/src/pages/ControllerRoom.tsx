@@ -86,8 +86,6 @@ export default function ControllerRoom() {
         if (msg.type === "active") {
           log("active received — attaching video");
           setStatus("connected");
-          // Defer srcObject assignment until after React re-renders the
-          // <video> element (which only appears when status==="connected").
           requestAnimationFrame(() => {
             const v = videoRef.current;
             const track = pendingVideoTrackRef.current;
@@ -97,6 +95,26 @@ export default function ControllerRoom() {
             v.play()
               .then(() => log("video playing OK"))
               .catch(() => { setNeedsTap(true); });
+            // Poll RTP stats for 10s to see if packets arrive
+            const pc = pcRef.current;
+            if (pc) {
+              let n = 0;
+              const t = setInterval(async () => {
+                n++;
+                if (n > 5) { clearInterval(t); return; }
+                try {
+                  const stats = await pc.getStats(track);
+                  let found = false;
+                  stats.forEach((r) => {
+                    if (r.type === "inbound-rtp" && r.kind === "video") {
+                      found = true;
+                      log(`pkts=${r.packetsReceived} dec=${r.framesDecoded ?? "?"}`);
+                    }
+                  });
+                  if (!found) log(`${n*2}s: no inbound-rtp`);
+                } catch { /* ignore */ }
+              }, 2000);
+            }
           });
         }
         // CONTRACT: The server sends "terminate" to tell us the session is over.
