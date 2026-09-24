@@ -41,7 +41,13 @@ impl InputController {
                     .move_mouse(px, py, Coordinate::Abs)?;
             }
 
-            ControlMessage::MouseButton { action, button } => {
+            ControlMessage::MouseButton { action, button, x, y } => {
+                // If position is provided, move the cursor there first.
+                if let (Some(nx), Some(ny)) = (x, y) {
+                    let px = (nx * self.screen_w as f64).round() as i32;
+                    let py = (ny * self.screen_h as f64).round() as i32;
+                    let _ = self.enigo.move_mouse(px, py, Coordinate::Abs);
+                }
                 let btn = map_button(button);
                 let dir = match action {
                     ButtonAction::Down => Direction::Press,

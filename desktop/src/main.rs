@@ -65,6 +65,10 @@ enum AppState {
         texture: Option<egui::TextureHandle>,
     },
     ParticipantInput,
+    /// Token validated, waiting for WebRTC to fully connect.
+    ParticipantWaiting {
+        terminate_tx: std::sync::mpsc::SyncSender<()>,
+    },
     ParticipantActive {
         terminate_tx: std::sync::mpsc::SyncSender<()>,
     },
@@ -76,6 +80,10 @@ enum AppMsg {
         frame_buf: Arc<Mutex<controller::FrameBuffer>>,
         input_tx: tokio::sync::mpsc::Sender<String>,
     },
+    /// Participant: token validated, WebRTC peer connection fully established.
+    ParticipantConnected,
+    /// Participant: token was rejected or connection failed before WebRTC connected.
+    ParticipantError { message: String },
     SessionEnded,
 }
 
@@ -114,6 +122,15 @@ impl eframe::App for RemotaApp {
                     self.state = AppState::ControllerConnected {
                         frame_buf, input_tx, terminate_tx, texture: None,
                     };
+                }
+                AppMsg::ParticipantConnected => {
+                    if let AppState::ParticipantWaiting { terminate_tx } = &self.state {
+                        let ttx = terminate_tx.clone();
+                        self.state = AppState::ParticipantActive { terminate_tx: ttx };
+                    }
+                }
+                AppMsg::ParticipantError { message } => {
+                    self.state = AppState::Ended { message };
                 }
                 AppMsg::SessionEnded => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(520.0, 340.0)));
@@ -330,6 +347,24 @@ impl eframe::App for RemotaApp {
                     });
                 }
 
+                AppState::ParticipantWaiting { terminate_tx } => {
+                    let ttx = terminate_tx.clone();
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(60.0);
+                        ui.label(egui::RichText::new("Connecting…").size(18.0).color(egui::Color32::GRAY));
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Establishing secure connection with the controller.").color(egui::Color32::GRAY));
+                        ui.add_space(32.0);
+                        if ui.add_sized(egui::vec2(180.0, 44.0),
+                            egui::Button::new(egui::RichText::new("Cancel").size(15.0))
+                                .fill(egui::Color32::from_rgb(180, 40, 40))
+                        ).clicked() {
+                            do_terminate = Some(ttx);
+                            next_state = Some(AppState::Home);
+                        }
+                    });
+                }
+
                 AppState::ParticipantActive { terminate_tx } => {
                     let ttx = terminate_tx.clone();
                     ui.vertical_centered(|ui| {
@@ -400,24 +435,64 @@ impl RemotaApp {
     fn start_participant(&mut self, token: String) {
         let msg_tx = self.msg_tx.clone();
         let (term_tx, term_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let msg_tx2 = msg_tx.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            if let Err(e) = rt.block_on(run_participant_async(token, term_rx)) {
-                error!("[participant] error: {e}");
+            match rt.block_on(run_participant_async(token, term_rx, msg_tx2.clone())) {
+                Err(e) => {
+                    error!("[participant] error: {e}");
+                    let _ = msg_tx2.try_send(AppMsg::ParticipantError {
+                        message: format!("Connection failed: {e}"),
+                    });
+                    return;
+                }
+                Ok(()) => {}
             }
             let _ = msg_tx.try_send(AppMsg::SessionEnded);
         });
-        self.state = AppState::ParticipantActive { terminate_tx: term_tx };
+        self.state = AppState::ParticipantWaiting { terminate_tx: term_tx };
     }
 }
 
 // ── Participant async task ────────────────────────────────────────────────────
 
-async fn run_participant_async(token: String, term_rx: std::sync::mpsc::Receiver<()>) -> Result<()> {
+async fn run_participant_async(
+    token: String,
+    term_rx: std::sync::mpsc::Receiver<()>,
+    app_tx: std::sync::mpsc::SyncSender<AppMsg>,
+) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::mpsc;
     use tracing::info;
     use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+
+    // ── 1. Validate the token before attempting any WebRTC setup ─────────────
+    {
+        let base = config::WS_URL
+            .replace("wss://", "https://")
+            .replace("ws://", "http://");
+        let url = format!("{base}/rooms/{token}");
+        match ureq::get(&url).call() {
+            Ok(resp) => {
+                // 2xx: room exists and is active — proceed
+                let status = resp.status();
+                if status != 200 {
+                    return Err(anyhow::anyhow!("Unexpected status {status} from server"));
+                }
+            }
+            Err(ureq::Error::Status(code, _)) => {
+                let msg = match code {
+                    404 => "Invalid session token.",
+                    410 => "This session has expired or ended.",
+                    _ => "Server rejected the token.",
+                };
+                return Err(anyhow::anyhow!("{msg}"));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Could not reach server: {e}"));
+            }
+        }
+    }
 
     let ws_url = format!("{}/ws", config::WS_URL);
     info!("[participant] connecting token={token}");
@@ -449,8 +524,6 @@ async fn run_participant_async(token: String, term_rx: std::sync::mpsc::Receiver
         }
     }); }
 
-    show_active_notification();
-
     loop {
         if term_rx.try_recv().is_ok() {
             let _ = signal_tx.send(r#"{"type":"terminate"}"#.to_owned()).await;
@@ -473,6 +546,12 @@ async fn run_participant_async(token: String, term_rx: std::sync::mpsc::Receiver
                     let _ = signal_tx.send(r#"{"type":"active"}"#.to_owned()).await;
                     force_keyframe.store(true, Ordering::Relaxed);
                     let _ = connected_tx.send(true);
+                    // Notify UI that WebRTC is actually up — transition from
+                    // ParticipantWaiting → ParticipantActive.
+                    let _ = app_tx.try_send(AppMsg::ParticipantConnected);
+                    // Show the OS notification AFTER we're connected, and in a
+                    // separate thread so it never blocks this async task.
+                    show_active_notification();
                 }
                 RTCPeerConnectionState::Failed => {
                     let _ = signal_tx.send(r#"{"type":"terminate"}"#.to_owned()).await;

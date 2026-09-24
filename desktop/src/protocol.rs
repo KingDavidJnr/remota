@@ -13,6 +13,10 @@ pub enum ControlMessage {
     MouseButton {
         action: ButtonAction,
         button: MouseButton,
+        // Optional position — sent by the desktop controller to move
+        // the cursor to the click location before pressing the button.
+        x: Option<f64>,
+        y: Option<f64>,
     },
     MouseDblclick {
         x: f64,
