@@ -20,7 +20,7 @@ use std::{
     },
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use eframe::egui;
 use tokio::sync::mpsc;
 use tracing::{error, info};
@@ -97,6 +97,11 @@ impl eframe::App for RemotaLauncher {
 
             ui.add_space(32.0);
 
+            // Collect any state transition requested inside the UI closures
+            let mut go_participant = false;
+            let mut go_home = false;
+            let mut launch_token: Option<String> = None;
+
             match &mut self.state {
                 LauncherState::Home => {
                     ui.vertical_centered(|ui| {
@@ -108,14 +113,12 @@ impl eframe::App for RemotaLauncher {
                         if ui.add_sized(btn_size, egui::Button::new(
                             egui::RichText::new("🖥  Control a remote computer").size(15.0)
                         )).clicked() {
-                            // Launch controller on background thread
                             std::thread::spawn(|| {
                                 let rt = tokio::runtime::Runtime::new().unwrap();
                                 if let Err(e) = rt.block_on(controller::run_controller()) {
                                     error!("[main] controller error: {e}");
                                 }
                             });
-                            // Close the launcher
                             std::process::exit(0);
                         }
 
@@ -124,10 +127,7 @@ impl eframe::App for RemotaLauncher {
                         if ui.add_sized(btn_size, egui::Button::new(
                             egui::RichText::new("🔗  Join a remote session").size(15.0)
                         )).clicked() {
-                            self.state = LauncherState::Participant {
-                                token_input: String::new(),
-                                error: None,
-                            };
+                            go_participant = true;
                         }
                     });
                 }
@@ -157,7 +157,6 @@ impl eframe::App for RemotaLauncher {
                             egui::Button::new(egui::RichText::new("Connect").size(15.0))
                         ).clicked();
 
-                        // Also allow Enter key
                         let enter_pressed = response.lost_focus()
                             && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
@@ -166,18 +165,28 @@ impl eframe::App for RemotaLauncher {
                             if token.is_empty() {
                                 *error = Some("Please enter a session token.".to_owned());
                             } else {
-                                let t = token.clone();
-                                std::thread::spawn(move || run_participant(t));
-                                std::process::exit(0);
+                                launch_token = Some(token);
                             }
                         }
 
                         ui.add_space(8.0);
                         if ui.small_button("← Back").clicked() {
-                            self.state = LauncherState::Home;
+                            go_home = true;
                         }
                     });
                 }
+            }
+
+            // Apply state transitions outside the borrow
+            if go_participant {
+                self.state = LauncherState::Participant { token_input: String::new(), error: None };
+            }
+            if go_home {
+                self.state = LauncherState::Home;
+            }
+            if let Some(token) = launch_token {
+                std::thread::spawn(move || run_participant(token));
+                std::process::exit(0);
             }
         });
     }
