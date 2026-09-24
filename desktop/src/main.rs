@@ -1,13 +1,8 @@
-// ── Remota Desktop Endpoint ───────────────────────────────────────────────────
-// Windows native application.
-//
-// Modes:
-//   Participant (default): remota-desktop.exe [token | remota://session/<token>]
-//   Controller:            remota-desktop.exe --controller  (or -c)
-//
-// The WS URL and TURN credentials are baked into the binary at build time.
+// ── Remota Desktop ───────────────────────────────────────────────────────────
+// Native Windows application.
+// Opens a GUI launcher where the user chooses Controller or Participant mode.
 
-// #![windows_subsystem = "windows"]  // re-enable after debugging
+#![windows_subsystem = "windows"]
 
 mod capture;
 mod config;
@@ -19,7 +14,6 @@ mod signaling;
 mod webrtc_session;
 
 use std::{
-    io::{self, BufRead, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -27,66 +21,182 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use eframe::egui;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // ── Logging ───────────────────────────────────────────────────────────────
+fn main() {
+    // Logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("remota_desktop=debug".parse().unwrap()),
+                .add_directive("remota_desktop=info".parse().unwrap()),
         )
         .init();
 
-    // ── Register remota:// protocol handler ───────────────────────────────────
+    // Register remota:// deep-link handler
     if let Err(e) = register::register_protocol_handler() {
         tracing::warn!("[main] protocol handler registration failed: {e}");
     }
 
+    // Check for deep-link argument — participant mode via URL scheme
     let args: Vec<String> = std::env::args().collect();
-
-    // ── Controller mode ───────────────────────────────────────────────────────
-    if args.get(1).map(|a| a == "--controller" || a == "-c").unwrap_or(false) {
-        info!("Starting in controller mode");
-        return controller::run_controller().await;
+    if let Some(arg) = args.get(1) {
+        if let Some(token) = register::parse_deep_link(arg) {
+            // Launched via remota:// URI — go straight to participant mode
+            run_participant(token);
+            return;
+        }
     }
 
-    // ── Participant mode (default) ────────────────────────────────────────────
-    // The WS URL is always baked in. The token comes from:
-    //   a) deep-link URI: remota://session/<token>
-    //   b) plain token as arg 1
-    //   c) interactive stdin prompt
-    let token = match args.get(1) {
-        Some(arg) => {
-            if let Some(t) = register::parse_deep_link(arg) {
-                t
-            } else {
-                arg.clone()
-            }
-        }
-        None => {
-            print!("Enter session token: ");
-            io::stdout().flush().ok();
-            let mut line = String::new();
-            io::stdin()
-                .lock()
-                .read_line(&mut line)
-                .context("Failed to read token from stdin")?;
-            let t = line.trim().to_owned();
-            if t.is_empty() {
-                anyhow::bail!("No token provided");
-            }
-            t
-        }
+    // Show the launcher UI
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Remota")
+            .with_inner_size([420.0, 280.0])
+            .with_resizable(false),
+        ..Default::default()
     };
 
+    eframe::run_native(
+        "Remota",
+        options,
+        Box::new(|_cc| Ok(Box::new(RemotaLauncher::default()))),
+    ).unwrap();
+}
+
+// ── Launcher UI ───────────────────────────────────────────────────────────────
+
+#[derive(Default)]
+enum LauncherState {
+    #[default]
+    Home,
+    Participant { token_input: String, error: Option<String> },
+}
+
+struct RemotaLauncher {
+    state: LauncherState,
+}
+
+impl Default for RemotaLauncher {
+    fn default() -> Self {
+        Self { state: LauncherState::Home }
+    }
+}
+
+impl eframe::App for RemotaLauncher {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(24.0);
+
+            ui.vertical_centered(|ui| {
+                ui.heading(egui::RichText::new("Remota").size(28.0).strong());
+                ui.label(egui::RichText::new("Remote Desktop").size(14.0).color(egui::Color32::GRAY));
+            });
+
+            ui.add_space(32.0);
+
+            match &mut self.state {
+                LauncherState::Home => {
+                    ui.vertical_centered(|ui| {
+                        ui.label("What would you like to do?");
+                        ui.add_space(16.0);
+
+                        let btn_size = egui::vec2(240.0, 48.0);
+
+                        if ui.add_sized(btn_size, egui::Button::new(
+                            egui::RichText::new("🖥  Control a remote computer").size(15.0)
+                        )).clicked() {
+                            // Launch controller on background thread
+                            std::thread::spawn(|| {
+                                let rt = tokio::runtime::Runtime::new().unwrap();
+                                if let Err(e) = rt.block_on(controller::run_controller()) {
+                                    error!("[main] controller error: {e}");
+                                }
+                            });
+                            // Close the launcher
+                            std::process::exit(0);
+                        }
+
+                        ui.add_space(12.0);
+
+                        if ui.add_sized(btn_size, egui::Button::new(
+                            egui::RichText::new("🔗  Join a remote session").size(15.0)
+                        )).clicked() {
+                            self.state = LauncherState::Participant {
+                                token_input: String::new(),
+                                error: None,
+                            };
+                        }
+                    });
+                }
+
+                LauncherState::Participant { token_input, error } => {
+                    ui.vertical_centered(|ui| {
+                        ui.label("Paste the session token from the link:");
+                        ui.add_space(8.0);
+
+                        let response = ui.add_sized(
+                            egui::vec2(340.0, 32.0),
+                            egui::TextEdit::singleline(token_input)
+                                .hint_text("Session token…")
+                        );
+
+                        ui.add_space(8.0);
+
+                        if let Some(err) = error.as_ref() {
+                            ui.label(
+                                egui::RichText::new(err).color(egui::Color32::RED).size(12.0)
+                            );
+                            ui.add_space(4.0);
+                        }
+
+                        let connect_clicked = ui.add_sized(
+                            egui::vec2(240.0, 40.0),
+                            egui::Button::new(egui::RichText::new("Connect").size(15.0))
+                        ).clicked();
+
+                        // Also allow Enter key
+                        let enter_pressed = response.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                        if connect_clicked || enter_pressed {
+                            let token = token_input.trim().to_owned();
+                            if token.is_empty() {
+                                *error = Some("Please enter a session token.".to_owned());
+                            } else {
+                                let t = token.clone();
+                                std::thread::spawn(move || run_participant(t));
+                                std::process::exit(0);
+                            }
+                        }
+
+                        ui.add_space(8.0);
+                        if ui.small_button("← Back").clicked() {
+                            self.state = LauncherState::Home;
+                        }
+                    });
+                }
+            }
+        });
+    }
+}
+
+// ── Participant mode ──────────────────────────────────────────────────────────
+
+fn run_participant(token: String) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    if let Err(e) = rt.block_on(run_participant_async(token)) {
+        error!("[participant] error: {e}");
+    }
+}
+
+async fn run_participant_async(token: String) -> Result<()> {
     let ws_url = format!("{}/ws", config::WS_URL);
 
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    info!("  Remota Desktop — connecting");
+    info!("  Remota Desktop — connecting as participant");
     info!("  Server : {}", config::WS_URL);
     info!("  Token  : {token}");
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -114,10 +224,7 @@ async fn run(ws_url: &str, token: &str) -> Result<()> {
     let stop_capture = Arc::new(AtomicBool::new(false));
     capture::start(frame_tx, Arc::clone(&stop_capture))?;
 
-    // Gate that the encoding loop waits on before it starts consuming frames.
-    // Set to true once WebRTC reaches Connected so that encode/write only begins
-    // after the RTP sender is bound and a post-connect keyframe has been produced.
-    let force_keyframe = Arc::new(AtomicBool::new(false));
+    let force_keyframe = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (connected_tx, connected_rx) = tokio::sync::watch::channel(false);
 
     {
@@ -142,6 +249,9 @@ async fn run(ws_url: &str, token: &str) -> Result<()> {
         });
     }
 
+    // Show Windows notification that remote access is active
+    show_active_notification();
+
     loop {
         tokio::select! {
             Some(event) = signal_rx.recv() => {
@@ -163,13 +273,10 @@ async fn run(ws_url: &str, token: &str) -> Result<()> {
                             error!("[main] add_ice_candidate: {e}");
                         }
                     }
-                    // Server told us the session is over — clean up and exit.
                     signaling::SignalEvent::Terminate => {
                         info!("[main] session terminated by server");
                         break;
                     }
-                    // WebSocket disconnected — server grace period is counting.
-                    // Exit after 12s (slightly longer than the server's 10s grace).
                     signaling::SignalEvent::Disconnected => {
                         info!("[main] signaling disconnected — exiting in 12s");
                         tokio::time::sleep(tokio::time::Duration::from_secs(12)).await;
@@ -186,39 +293,24 @@ async fn run(ws_url: &str, token: &str) -> Result<()> {
                 match state {
                     RTCPeerConnectionState::Connected => {
                         let _ = signal_tx.send(r#"{"type":"active"}"#.to_owned()).await;
-                        // Ungate the encoding loop: the RTP sender is now bound so
-                        // write_sample calls will succeed. Set force_keyframe first so
-                        // the very first frame the loop encodes is a keyframe.
                         force_keyframe.store(true, std::sync::atomic::Ordering::Relaxed);
                         let _ = connected_tx.send(true);
                         info!("[main] Connected — encoding started, keyframe requested");
-                        show_active_notification();
                     }
-                    // "failed" is unrecoverable — send terminate REQUEST to server.
-                    // Server will broadcast terminate to all parties including us,
-                    // and we will break the loop on receiving SignalEvent::Terminate.
                     RTCPeerConnectionState::Failed => {
                         info!("[main] WebRTC failed — requesting termination");
                         let _ = signal_tx.send(r#"{"type":"terminate"}"#.to_owned()).await;
                     }
-                    // "disconnected" is transient — do NOT terminate.
-                    // "closed" means we closed the PC ourselves — already cleaning up.
                     _ => {}
                 }
             }
         }
     }
 
-    info!("[main] cleaning up — releasing all input...");
+    info!("[main] cleaning up…");
     input.release_all_modifiers();
     stop_capture.store(true, Ordering::Relaxed);
     session.close().await;
-    // Do NOT send terminate here — the server already terminated the room
-    // (we only reach this point after receiving SignalEvent::Terminate from the server,
-    // or after sending a terminate request ourselves due to WebRTC failure).
-
-    // Force process exit — with windows_subsystem = "windows" there is no
-    // console or window to close, so we must exit explicitly.
     std::process::exit(0);
 }
 
@@ -234,32 +326,22 @@ fn get_primary_screen_dimensions() -> (u32, u32) {
             return (w as u32, h as u32);
         }
     }
-
-    #[cfg(target_os = "macos")]
-    {
-        use screencapturekit::prelude::SCShareableContent;
-        if let Ok(content) = SCShareableContent::get() {
-            if let Some(display) = content.displays().into_iter().next() {
-                return (display.width() as u32, display.height() as u32);
-            }
-        }
-    }
-
     (1920, 1080)
 }
 
-/// Shows a Windows MessageBox informing the participant remote control is active.
-/// Non-blocking — spawned on a background thread so it doesn't block the event loop.
 fn show_active_notification() {
     #[cfg(target_os = "windows")]
     std::thread::spawn(|| {
-        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONINFORMATION, MB_TOPMOST};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            MessageBoxW, MB_OK, MB_ICONINFORMATION, MB_TOPMOST,
+        };
         use windows::core::PCWSTR;
 
-        let title: Vec<u16> = "Remota — Remote Access Active\0".encode_utf16().collect();
-        let msg: Vec<u16> = "Remote access is now active.\nThe other person can see your screen.\n\nClose the Remota Desktop app to end the session.\0"
-            .encode_utf16()
-            .collect();
+        let title: Vec<u16> = "Remota — Remote Access Active\0"
+            .encode_utf16().collect();
+        let msg: Vec<u16> =
+            "Remote access is now active.\nThe other person can see your screen.\n\nClose Remota to end the session.\0"
+            .encode_utf16().collect();
 
         unsafe {
             MessageBoxW(

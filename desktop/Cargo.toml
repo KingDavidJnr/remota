@@ -32,9 +32,9 @@ vpx-encode = { version = "0.6", features = ["ffi-generate"] }
 # Package name is env-libvpx-sys but the Rust crate name is vpx_sys
 env-libvpx-sys = "5.1"
 
-# Window rendering (controller side)
-winit = "0.30"
-softbuffer = "0.4"
+# Native GUI (launcher + controller remote view)
+eframe = { version = "0.29", default-features = true }
+egui = "0.29"
 
 # HTTP client for room creation (controller side)
 ureq = { version = "2", features = ["native-tls", "json"] }
