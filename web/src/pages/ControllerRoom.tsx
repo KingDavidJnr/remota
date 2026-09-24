@@ -215,9 +215,14 @@ export default function ControllerRoom() {
       log("video element ready, waiting for active signal");
       return;
     }
-    log("attaching video stream");
+    log(`attaching: track.readyState=${track.readyState} track.muted=${track.muted}`);
     v.srcObject = new MediaStream([track]);
     v.muted = true;
+    // Log video element events to diagnose why play() may hang
+    v.onloadedmetadata = () => log(`loadedmetadata ${v.videoWidth}x${v.videoHeight}`);
+    v.onstalled = () => log("video stalled");
+    v.onwaiting = () => log("video waiting");
+    v.onerror = () => log(`video error: ${v.error?.message ?? "unknown"}`);
     v.play()
       .then(() => {
         v.muted = false;
@@ -232,6 +237,23 @@ export default function ControllerRoom() {
           v.play().then(() => { v.muted = false; }).catch(() => {});
         }
       });
+    // Poll RTP stats every 2s for 30s to diagnose packet delivery
+    const pc = pcRef.current;
+    if (pc) {
+      let polls = 0;
+      const statsTimer = setInterval(async () => {
+        polls++;
+        if (polls > 15) { clearInterval(statsTimer); return; }
+        try {
+          const stats = await pc.getStats(track);
+          stats.forEach((r) => {
+            if (r.type === "inbound-rtp" && r.kind === "video") {
+              log(`RTP pkts=${r.packetsReceived} decoded=${r.framesDecoded ?? "?"} dropped=${r.framesDropped ?? "?"}`);
+            }
+          });
+        } catch { /* ignore */ }
+      }, 2000);
+    }
   }
 
   // When videoReady becomes true, the <video> element is already in the DOM
