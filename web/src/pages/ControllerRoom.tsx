@@ -32,12 +32,6 @@ export default function ControllerRoom() {
   const [showConfirm, setShowConfirm] = useState(false);
   const [micMuted, setMicMuted] = useState(false);
   const [hasMic, setHasMic] = useState(false);
-  const [debugMsg, setDebugMsg] = useState("");
-
-  function log(msg: string) {
-    setDebugMsg(msg);
-  }
-
   const joinUrl = `${window.location.origin}/join/${token ?? ""}`;
 
   // ── Touch gesture state (refs so handlers don't stale-close over them) ──────
@@ -89,29 +83,11 @@ export default function ControllerRoom() {
             const track = pendingVideoTrackRef.current;
             if (!v || !track || videoAttachedRef.current) return;
             videoAttachedRef.current = true;
-            log(`attaching: readyState=${track.readyState}`);
             v.srcObject = new MediaStream([track]);
             v.play().catch((err: unknown) => {
               log(`play failed: ${err}`);
               setNeedsTap(true);
             });
-            // Single stats check 3s after attachment
-            const pc = pcRef.current;
-            if (pc) {
-              setTimeout(async () => {
-                try {
-                  const stats = await pc.getStats(track);
-                  let found = false;
-                  stats.forEach((r) => {
-                    if (r.type === "inbound-rtp" && r.kind === "video") {
-                      found = true;
-                      log(`3s check: pkts=${r.packetsReceived} decoded=${r.framesDecoded ?? "?"}`);
-                    }
-                  });
-                  if (!found) log("3s check: no inbound-rtp video entry");
-                } catch { /* ignore */ }
-              }, 3000);
-            }
           });
         }
         // CONTRACT: The server sends "terminate" to tell us the session is over.
@@ -158,31 +134,8 @@ export default function ControllerRoom() {
       }
 
       pc.ontrack = (e) => {
-        log(`ontrack: ${e.track.kind} readyState=${e.track.readyState}`);
-
         if (e.track.kind === "video") {
-          // Store the track — srcObject is assigned only when "active" is received
-          // from the desktop (after it has sent a post-connect keyframe).
-          // Assigning srcObject here would cause the browser to start decoding
-          // delta-only packets and display a permanent black screen.
           pendingVideoTrackRef.current = e.track;
-          log("video track received — waiting for active signal");
-
-          // DIAGNOSTIC: poll getStats every 3s to check if browser receives RTP packets
-          const statsInterval = setInterval(async () => {
-            try {
-              const stats = await pc.getStats(e.track);
-              stats.forEach((report) => {
-                if (report.type === "inbound-rtp" && report.kind === "video") {
-                  log(`RTP: pkts=${report.packetsReceived} frames=${report.framesReceived ?? "?"} decoded=${report.framesDecoded ?? "?"} dropped=${report.framesDropped ?? "?"}`);
-                }
-              });
-            } catch { /* ignore */ }
-          }, 3000);
-
-          // Stop polling after 30s
-          setTimeout(() => clearInterval(statsInterval), 30000);
-
           setTimeout(() => {
             if (dcRef.current?.readyState !== "open") setViewOnly(true);
           }, 3000);
@@ -200,7 +153,6 @@ export default function ControllerRoom() {
       // "closed" happens when we ourselves close the PC (already cleaning up).
       // On "failed" we ask the SERVER to terminate — we do not self-terminate.
       pc.onconnectionstatechange = () => {
-        log(`conn: ${pc.connectionState}`);
         if (pc.connectionState === "failed") {
           sig.send({ type: "terminate" });
         }
@@ -592,11 +544,6 @@ export default function ControllerRoom() {
 
       {/* Remote screen */}
       <div className="flex-1 relative flex items-center justify-center bg-black">
-        {debugMsg && (
-          <div className="absolute top-2 left-2 z-50 bg-black/80 text-green-400 text-xs font-mono px-2 py-1 rounded pointer-events-none">
-            {debugMsg}
-          </div>
-        )}
         <video
           ref={videoRef}
           autoPlay

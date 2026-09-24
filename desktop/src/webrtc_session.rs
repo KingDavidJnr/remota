@@ -181,7 +181,7 @@ impl Session {
 
         self.pc.set_remote_description(offer).await?;
 
-        self.pc
+        let sender = self.pc
             .add_track(Arc::clone(&self.video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await
             .context("add video track in handle_offer")?;
@@ -196,9 +196,25 @@ impl Session {
             .await
             .context("no local description after gathering")?;
 
-        info!("[webrtc] answer SDP:\n{}", local.sdp);
+        // webrtc-rs 0.13 does not include a=ssrc lines in the answer SDP when
+        // responding to a sendonly offer (issue #563, closed "not planned").
+        // Chrome requires a=ssrc to create an inbound-rtp receiver and fire
+        // ontrack. Inject the lines manually before signaling the answer.
+        let params = sender.get_parameters().await;
+        let ssrc = params.encodings.first().map(|e| e.ssrc).unwrap_or(0);
+        let patched_sdp = if ssrc != 0 {
+            inject_ssrc_into_answer(&local.sdp, ssrc, "remota-screen", "video")
+        } else {
+            warn!("[webrtc] SSRC is 0 — skipping a=ssrc injection");
+            local.sdp.clone()
+        };
 
-        Ok(local)
+        let patched = RTCSessionDescription::answer(patched_sdp)
+            .context("build patched answer")?;
+
+        info!("[webrtc] answer SDP (patched):\n{}", patched.sdp);
+
+        Ok(patched)
     }
 
     pub async fn add_ice_candidate(&self, candidate_json: &str) -> Result<()> {
@@ -213,6 +229,56 @@ impl Session {
             warn!("[webrtc] close error: {e}");
         }
     }
+}
+
+// ── SDP munging ───────────────────────────────────────────────────────────────
+
+/// Inject `a=ssrc` lines into the video m-section of an answer SDP.
+///
+/// webrtc-rs 0.13 omits `a=ssrc` from answers when responding to a `sendonly`
+/// offer (issue #563). Chrome requires `a=ssrc` to create an inbound-rtp
+/// receiver and fire `ontrack`. This function patches the SDP string before
+/// it is signalled to the browser.
+///
+/// The lines injected are:
+///   a=ssrc:<ssrc> cname:<stream_id>
+///   a=ssrc:<ssrc> msid:<stream_id> <track_id>
+///
+/// These are appended at the end of the video m-section (before the next
+/// `m=` line or end of string).
+fn inject_ssrc_into_answer(sdp: &str, ssrc: u32, stream_id: &str, track_id: &str) -> String {
+    let ssrc_lines = format!(
+        "a=ssrc:{ssrc} cname:{stream_id}\r\na=ssrc:{ssrc} msid:{stream_id} {track_id}\r\n"
+    );
+
+    // Find the video m= section
+    let video_marker = "\r\nm=video ";
+    let Some(video_start) = sdp.find(video_marker) else {
+        warn!("[webrtc] inject_ssrc: no video m= section found in SDP");
+        return sdp.to_owned();
+    };
+
+    // Find where the video section ends (start of next m= section or EOF)
+    let section_body_start = video_start + video_marker.len();
+    let next_m = sdp[section_body_start..]
+        .find("\r\nm=")
+        .map(|pos| section_body_start + pos + 2); // +2 to keep the \r\n before next m=
+
+    let insert_at = next_m.unwrap_or(sdp.len());
+
+    // Don't inject if a=ssrc lines already present in this section
+    let video_section = &sdp[video_start..insert_at];
+    if video_section.contains("a=ssrc:") {
+        return sdp.to_owned();
+    }
+
+    let mut result = String::with_capacity(sdp.len() + ssrc_lines.len());
+    result.push_str(&sdp[..insert_at]);
+    result.push_str(&ssrc_lines);
+    result.push_str(&sdp[insert_at..]);
+
+    info!("[webrtc] injected a=ssrc:{ssrc} into video section");
+    result
 }
 
 // ── VP8 encoding loop ─────────────────────────────────────────────────────────
