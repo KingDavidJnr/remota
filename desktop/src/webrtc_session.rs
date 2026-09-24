@@ -124,39 +124,46 @@ impl Session {
             pc.on_data_channel(Box::new(move |dc| {
                 let ctrl = ctrl.clone();
                 Box::pin(async move {
-                    info!("[webrtc] DataChannel '{}' received", dc.label());
+                    let label = dc.label().to_owned();
+                    let state = dc.ready_state();
+                    info!("[webrtc] DataChannel '{label}' received, state={state:?}");
 
-                    // Register on_open — dc_held keeps the Arc alive inside
-                    // the closure so the channel is not torn down before open.
-                    let dc_held = Arc::clone(&dc);
+                    // Register on_message immediately — the channel may already
+                    // be open by the time on_data_channel fires (SCTP Established
+                    // before the callback runs). on_open is not guaranteed to fire
+                    // if the channel is already open.
+                    let ctrl_msg = ctrl.clone();
+                    let dc_msg = Arc::clone(&dc);
+                    dc.on_message(Box::new(move |msg| {
+                        let ctrl = ctrl_msg.clone();
+                        let data = msg.data.clone();
+                        Box::pin(async move {
+                            match serde_json::from_slice::<ControlMessage>(&data) {
+                                Ok(m) => { let _ = ctrl.send(m).await; }
+                                Err(e) => warn!("[webrtc] bad control msg: {e}"),
+                            }
+                        })
+                    }));
+                    info!("[webrtc] DataChannel '{label}' on_message registered");
+
+                    // Also hook on_open in case it fires later.
+                    let label2 = label.clone();
                     dc.on_open(Box::new(move || {
-                        let ctrl = ctrl.clone();
-                        let dc_msg = Arc::clone(&dc_held);
-                        info!("[webrtc] DataChannel '{}' open", dc_msg.label());
-                        dc_msg.on_message(Box::new(move |msg| {
-                            let ctrl = ctrl.clone();
-                            let data = msg.data.clone();
-                            Box::pin(async move {
-                                match serde_json::from_slice::<ControlMessage>(&data) {
-                                    Ok(m) => { let _ = ctrl.send(m).await; }
-                                    Err(e) => warn!("[webrtc] bad control msg: {e}"),
-                                }
-                            })
-                        }));
+                        info!("[webrtc] DataChannel '{label2}' on_open fired");
                         Box::pin(async {})
                     }));
 
-                    // Keep dc alive until close via a Notify. Without this the
-                    // Arc drops at end of this block and webrtc-rs closes the
-                    // channel before on_open ever fires.
+                    // Keep dc alive until the channel closes.
                     let close_notify = Arc::new(tokio::sync::Notify::new());
                     let cn = Arc::clone(&close_notify);
                     dc.on_close(Box::new(move || {
                         cn.notify_one();
                         Box::pin(async {})
                     }));
+                    // dc_msg keeps the Arc alive alongside the close wait.
+                    let _keep_alive = dc_msg;
                     close_notify.notified().await;
-                    info!("[webrtc] DataChannel '{}' closed", dc.label());
+                    info!("[webrtc] DataChannel '{label}' closed");
                 })
             }));
         }
@@ -291,8 +298,8 @@ pub async fn run_encoding_loop(
 
     let frame_duration = Duration::from_millis(1000 / TARGET_FPS as u64);
 
-    // Channel: encoding thread → async write task
-    let (encoded_tx, mut encoded_rx) = mpsc::channel::<Bytes>(8);
+    // Channel: encoding thread → async write task (depth 2 — low latency)
+    let (encoded_tx, mut encoded_rx) = mpsc::channel::<Bytes>(2);
 
     // Capture the tokio runtime handle before entering the std thread
     let handle = tokio::runtime::Handle::current();

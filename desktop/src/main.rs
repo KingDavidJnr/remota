@@ -498,7 +498,7 @@ async fn run_participant_async(
     let ws_url = format!("{}/ws", config::WS_URL);
     info!("[participant] connecting token={token}");
 
-    let (frame_tx, frame_rx) = mpsc::channel::<capture::CapturedFrame>(4);
+    let (frame_tx, frame_rx) = mpsc::channel::<capture::CapturedFrame>(1);
     let (control_tx, mut control_rx) = mpsc::channel::<protocol::ControlMessage>(64);
     let (ice_event_tx, mut ice_event_rx) = mpsc::channel::<String>(32);
     let (state_tx, mut state_rx) = mpsc::channel::<RTCPeerConnectionState>(8);
