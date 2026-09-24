@@ -164,7 +164,7 @@ impl Vp8Decoder {
                 VPX_DECODER_ABI_VERSION as i32,
             )
         };
-        if rc != 0 {
+        if rc != vpx_sys::vpx_codec_err_t::VPX_CODEC_OK {
             anyhow::bail!("vpx_codec_dec_init failed: {}", rc as i32);
         }
         Ok(Self { ctx })
@@ -181,7 +181,7 @@ impl Vp8Decoder {
                 0,
             )
         };
-        if rc != 0 {
+        if rc != vpx_sys::vpx_codec_err_t::VPX_CODEC_OK {
             warn!("[controller] vpx_codec_decode error: {}", rc as i32);
             return None;
         }
