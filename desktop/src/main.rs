@@ -119,7 +119,8 @@ impl eframe::App for RemotaLauncher {
                                     error!("[main] controller error: {e}");
                                 }
                             });
-                            std::process::exit(0);
+                            // Close the launcher window — controller has its own window
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
 
                         ui.add_space(12.0);
@@ -186,7 +187,7 @@ impl eframe::App for RemotaLauncher {
             }
             if let Some(token) = launch_token {
                 std::thread::spawn(move || run_participant(token));
-                std::process::exit(0);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         });
     }
