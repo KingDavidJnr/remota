@@ -63,9 +63,13 @@ export default function ControllerRoom() {
           await startOffer();
         }
         if (msg.type === "answer") {
-          await pcRef.current?.setRemoteDescription(
-            new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
-          );
+          try {
+            await pcRef.current?.setRemoteDescription(
+              new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
+            );
+          } catch (e) {
+            console.error("[remota] setRemoteDescription failed:", e);
+          }
         }
         if (msg.type === "ice_candidate" && msg.candidate) {
           try {

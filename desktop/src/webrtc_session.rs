@@ -233,22 +233,19 @@ impl Session {
 
 // ── SDP munging ───────────────────────────────────────────────────────────────
 
-/// Inject `a=ssrc` lines into the video m-section of an answer SDP.
+/// Inject `a=msid` and `a=ssrc` lines into the video m-section of an answer SDP.
 ///
-/// webrtc-rs 0.13 omits `a=ssrc` from answers when responding to a `sendonly`
-/// offer (issue #563). Chrome requires `a=ssrc` to create an inbound-rtp
-/// receiver and fire `ontrack`. This function patches the SDP string before
-/// it is signalled to the browser.
+/// webrtc-rs 0.13 omits these lines from answers when responding to a `sendonly`
+/// offer (issue #563). Chrome requires `a=ssrc` (and ideally `a=msid`) to create
+/// an inbound-rtp receiver and fire `ontrack`.
 ///
-/// The lines injected are:
+/// Lines injected before the next m= section:
+///   a=msid:<stream_id> <track_id>
 ///   a=ssrc:<ssrc> cname:<stream_id>
 ///   a=ssrc:<ssrc> msid:<stream_id> <track_id>
-///
-/// These are appended at the end of the video m-section (before the next
-/// `m=` line or end of string).
 fn inject_ssrc_into_answer(sdp: &str, ssrc: u32, stream_id: &str, track_id: &str) -> String {
-    let ssrc_lines = format!(
-        "a=ssrc:{ssrc} cname:{stream_id}\r\na=ssrc:{ssrc} msid:{stream_id} {track_id}\r\n"
+    let inject = format!(
+        "a=msid:{stream_id} {track_id}\r\na=ssrc:{ssrc} cname:{stream_id}\r\na=ssrc:{ssrc} msid:{stream_id} {track_id}\r\n"
     );
 
     // Find the video m= section
@@ -272,12 +269,12 @@ fn inject_ssrc_into_answer(sdp: &str, ssrc: u32, stream_id: &str, track_id: &str
         return sdp.to_owned();
     }
 
-    let mut result = String::with_capacity(sdp.len() + ssrc_lines.len());
+    let mut result = String::with_capacity(sdp.len() + inject.len());
     result.push_str(&sdp[..insert_at]);
-    result.push_str(&ssrc_lines);
+    result.push_str(&inject);
     result.push_str(&sdp[insert_at..]);
 
-    info!("[webrtc] injected a=ssrc:{ssrc} into video section");
+    info!("[webrtc] injected a=msid + a=ssrc:{ssrc} into video section");
     result
 }
 
