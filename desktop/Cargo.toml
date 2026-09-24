@@ -29,6 +29,7 @@ enigo = "0.2"
 vpx-encode = { version = "0.6", features = ["ffi-generate"] }
 
 # VP8 video decoding (controller side: RTP → VP8 → I420 → BGRA)
+# Package name is env-libvpx-sys but the Rust crate name is vpx_sys
 env-libvpx-sys = "5.1"
 
 # Window rendering (controller side)

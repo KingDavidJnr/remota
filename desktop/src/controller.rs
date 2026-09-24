@@ -145,14 +145,14 @@ impl Vp8Depacketizer {
 // ── VP8 decoder ───────────────────────────────────────────────────────────────
 
 struct Vp8Decoder {
-    ctx: env_libvpx_sys::vpx_codec_ctx_t,
+    ctx: vpx_sys::vpx_codec_ctx_t,
 }
 
 unsafe impl Send for Vp8Decoder {}
 
 impl Vp8Decoder {
     fn new() -> Result<Self> {
-        use env_libvpx_sys::*;
+        use vpx_sys::*;
         let mut ctx: vpx_codec_ctx_t = unsafe { std::mem::zeroed() };
         let iface = unsafe { vpx_codec_vp8_dx() };
         let rc = unsafe {
@@ -171,7 +171,7 @@ impl Vp8Decoder {
     }
 
     fn decode(&mut self, data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
-        use env_libvpx_sys::*;
+        use vpx_sys::*;
         let rc = unsafe {
             vpx_codec_decode(
                 &mut self.ctx,
@@ -201,12 +201,12 @@ impl Vp8Decoder {
 
 impl Drop for Vp8Decoder {
     fn drop(&mut self) {
-        unsafe { env_libvpx_sys::vpx_codec_destroy(&mut self.ctx); }
+        unsafe { vpx_sys::vpx_codec_destroy(&mut self.ctx); }
     }
 }
 
-unsafe fn i420_to_bgra(img: *const env_libvpx_sys::vpx_image_t, w: u32, h: u32) -> Vec<u8> {
-    use env_libvpx_sys::*;
+unsafe fn i420_to_bgra(img: *const vpx_sys::vpx_image_t, w: u32, h: u32) -> Vec<u8> {
+    use vpx_sys::*;
     let w = w as usize;
     let h = h as usize;
     let mut out = vec![0u8; w * h * 4];
