@@ -242,13 +242,30 @@ pub async fn run_controller_async(
                 ControllerSignalEvent::ParticipantJoined => {
                     if started_offer { continue; }
                     started_offer = true;
-                    let offer = pc.create_offer(None).await?;
-                    pc.set_local_description(offer).await?;
-                    let mut g = pc.gathering_complete_promise().await;
-                    let _ = g.recv().await;
-                    let local = pc.local_description().await.context("no local desc")?;
-                    let _ = signal_tx.send(sig_client::make_controller_offer_msg(&local)?).await;
-                    info!("[controller] offer sent");
+                    // Spawn into a separate task so the main loop can continue
+                    // processing trickle-ICE candidates from the participant
+                    // while we wait for our own ICE gathering to complete.
+                    let pc2 = Arc::clone(&pc);
+                    let sig2 = signal_tx.clone();
+                    tokio::spawn(async move {
+                        let offer = match pc2.create_offer(None).await {
+                            Ok(o) => o,
+                            Err(e) => { error!("[controller] create_offer failed: {e}"); return; }
+                        };
+                        if let Err(e) = pc2.set_local_description(offer).await {
+                            error!("[controller] set_local_description failed: {e}"); return;
+                        }
+                        let mut gather = pc2.gathering_complete_promise().await;
+                        let _ = gather.recv().await;
+                        let local = match pc2.local_description().await {
+                            Some(d) => d,
+                            None => { error!("[controller] no local desc after gathering"); return; }
+                        };
+                        match sig_client::make_controller_offer_msg(&local) {
+                            Ok(msg) => { let _ = sig2.send(msg).await; info!("[controller] offer sent"); }
+                            Err(e) => error!("[controller] make_controller_offer_msg: {e}"),
+                        }
+                    });
                 }
                 ControllerSignalEvent::Answer(sdp) => {
                     pc.set_remote_description(RTCSessionDescription::answer(sdp)?).await?;
