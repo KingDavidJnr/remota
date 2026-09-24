@@ -532,9 +532,21 @@ async fn run_participant_async(
         tokio::select! {
             Some(event) = signal_rx.recv() => match event {
                 signaling::SignalEvent::Offer(sdp) => {
-                    if let Ok(answer) = session.handle_offer(&sdp).await {
-                        if let Ok(msg) = signaling::make_answer_msg(&answer) { let _ = signal_tx.send(msg).await; }
-                    }
+                    // Run offer handling in a separate task so the main loop
+                    // can continue processing trickle-ICE candidates from the
+                    // browser while the answer is being built and ICE gathered.
+                    let session2 = Arc::clone(&session);
+                    let sig2 = signal_tx.clone();
+                    tokio::spawn(async move {
+                        match session2.handle_offer(&sdp).await {
+                            Ok(answer) => {
+                                if let Ok(msg) = signaling::make_answer_msg(&answer) {
+                                    let _ = sig2.send(msg).await;
+                                }
+                            }
+                            Err(e) => error!("[participant] handle_offer failed: {e}"),
+                        }
+                    });
                 }
                 signaling::SignalEvent::IceCandidate(cj) => { let _ = session.add_ice_candidate(&cj).await; }
                 signaling::SignalEvent::Terminate => break,

@@ -124,16 +124,26 @@ impl Session {
             pc.on_data_channel(Box::new(move |dc| {
                 let ctrl = ctrl.clone();
                 Box::pin(async move {
-                    info!("[webrtc] DataChannel open: {}", dc.label());
-                    dc.on_message(Box::new(move |msg| {
+                    info!("[webrtc] DataChannel '{}' received", dc.label());
+                    // Clone dc into the on_open closure so the Arc stays alive
+                    // for the lifetime of the channel. Dropping dc here would
+                    // close the channel before any messages arrive.
+                    let dc_open = Arc::clone(&dc);
+                    dc.on_open(Box::new(move || {
                         let ctrl = ctrl.clone();
-                        let data = msg.data.clone();
-                        Box::pin(async move {
-                            match serde_json::from_slice::<ControlMessage>(&data) {
-                                Ok(m) => { let _ = ctrl.send(m).await; }
-                                Err(e) => warn!("[webrtc] bad control msg: {e}"),
-                            }
-                        })
+                        let dc_msg = Arc::clone(&dc_open);
+                        info!("[webrtc] DataChannel '{}' open — registering message handler", dc_msg.label());
+                        dc_msg.on_message(Box::new(move |msg| {
+                            let ctrl = ctrl.clone();
+                            let data = msg.data.clone();
+                            Box::pin(async move {
+                                match serde_json::from_slice::<ControlMessage>(&data) {
+                                    Ok(m) => { let _ = ctrl.send(m).await; }
+                                    Err(e) => warn!("[webrtc] bad control msg: {e}"),
+                                }
+                            })
+                        }));
+                        Box::pin(async {})
                     }));
                 })
             }));
@@ -187,8 +197,11 @@ impl Session {
             .context("add video track in handle_offer")?;
 
         let answer = self.pc.create_answer(None).await?;
-        let mut gather_complete = self.pc.gathering_complete_promise().await;
+        // set_local_description first — ICE gathering only starts after this call.
+        // The promise must be obtained after set_local_description so that it
+        // waits for the gathering that was just triggered, not a stale one.
         self.pc.set_local_description(answer).await?;
+        let mut gather_complete = self.pc.gathering_complete_promise().await;
         let _ = gather_complete.recv().await;
 
         let local = self.pc
