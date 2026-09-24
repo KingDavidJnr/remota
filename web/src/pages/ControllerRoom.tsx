@@ -21,10 +21,8 @@ export default function ControllerRoom() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const keyInputRef = useRef<HTMLInputElement>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
-  // Holds the incoming video track. Set by ontrack, consumed by attachVideo().
   const pendingVideoTrackRef = useRef<MediaStreamTrack | null>(null);
-  // Set to true when the "active" signal arrives from the desktop.
-  const [videoReady, setVideoReady] = useState(false);
+  const videoAttachedRef = useRef(false);
 
   const [status, setStatus] = useState<"waiting" | "connecting" | "connected" | "ended">("waiting");
   const [copied, setCopied] = useState(false);
@@ -83,15 +81,21 @@ export default function ControllerRoom() {
           } catch { /* ignore stale candidates */ }
         }
         if (msg.type === "active") {
-          log("received active from desktop");
-          // Signal that the video stream is ready to play. A separate useEffect
-          // watches videoReady + videoRef so that srcObject is assigned only after
-          // the <video> element is mounted in the DOM (which happens on status →
-          // "connected" re-render). Attempting to use videoRef.current here would
-          // fail because the element doesn't exist in the DOM until after
-          // setStatus("connected") triggers a re-render.
-          setVideoReady(true);
           setStatus("connected");
+          // Defer srcObject assignment until after React re-renders the
+          // <video> element (which only appears when status==="connected").
+          requestAnimationFrame(() => {
+            const v = videoRef.current;
+            const track = pendingVideoTrackRef.current;
+            if (!v || !track || videoAttachedRef.current) return;
+            videoAttachedRef.current = true;
+            log(`attaching: readyState=${track.readyState}`);
+            v.srcObject = new MediaStream([track]);
+            v.play().catch((err: unknown) => {
+              log(`play failed: ${err}`);
+              setNeedsTap(true);
+            });
+          });
         }
         // CONTRACT: The server sends "terminate" to tell us the session is over.
         // This is the ONLY signal that causes us to navigate away.
@@ -198,69 +202,11 @@ export default function ControllerRoom() {
       micTrackRef.current?.stop();
       micTrackRef.current = null;
       pendingVideoTrackRef.current = null;
-      setVideoReady(false);
+      videoAttachedRef.current = false;
       sig.close();
       pc?.close();
     }
   }, [token, navigate]);
-
-  // ── Attach video to the <video> element ───────────────────────────────────
-  // Called from two places: the ref callback when the video element mounts,
-  // and the active message handler. Whichever fires second will find both the
-  // DOM element and the track ready and complete the attachment.
-  function attachVideo(v: HTMLVideoElement | null) {
-    if (!v) return;
-    const track = pendingVideoTrackRef.current;
-    if (!track) {
-      log("video element ready, waiting for active signal");
-      return;
-    }
-    log(`attaching: track.readyState=${track.readyState} track.muted=${track.muted}`);
-    v.srcObject = new MediaStream([track]);
-    v.muted = true;
-    // Log video element events to diagnose why play() may hang
-    v.onloadedmetadata = () => log(`loadedmetadata ${v.videoWidth}x${v.videoHeight}`);
-    v.onstalled = () => log("video stalled");
-    v.onwaiting = () => log("video waiting");
-    v.onerror = () => log(`video error: ${v.error?.message ?? "unknown"}`);
-    v.play()
-      .then(() => {
-        v.muted = false;
-        log("video playing OK");
-      })
-      .catch((err: unknown) => {
-        log(`play failed: ${err}`);
-        if ("ontouchstart" in window) {
-          setNeedsTap(true);
-        } else {
-          v.muted = true;
-          v.play().then(() => { v.muted = false; }).catch(() => {});
-        }
-      });
-    // Poll RTP stats every 2s for 30s to diagnose packet delivery
-    const pc = pcRef.current;
-    if (pc) {
-      let polls = 0;
-      const statsTimer = setInterval(async () => {
-        polls++;
-        if (polls > 15) { clearInterval(statsTimer); return; }
-        try {
-          const stats = await pc.getStats(track);
-          stats.forEach((r) => {
-            if (r.type === "inbound-rtp" && r.kind === "video") {
-              log(`RTP pkts=${r.packetsReceived} decoded=${r.framesDecoded ?? "?"} dropped=${r.framesDropped ?? "?"}`);
-            }
-          });
-        } catch { /* ignore */ }
-      }, 2000);
-    }
-  }
-
-  // When videoReady becomes true, the <video> element is already in the DOM
-  // (same render batch as setStatus("connected")). Run attachVideo now.
-  useEffect(() => {
-    if (videoReady) attachVideo(videoRef.current);
-  }, [videoReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Mic toggle ────────────────────────────────────────────────────────────
   function handleMicToggle() {
@@ -635,15 +581,10 @@ export default function ControllerRoom() {
           </div>
         )}
         <video
-          ref={(el) => {
-            // Store in videoRef for event handlers, and attempt to attach
-            // the video stream if it's already ready (active arrived first).
-            (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
-            if (videoReady) attachVideo(el);
-          }}
+          ref={videoRef}
           autoPlay
           playsInline
-          muted={needsTap} // muted until user gesture unlocks audio
+          muted={needsTap}
           className="w-full h-full object-contain select-none touch-none bg-black"
           style={{ cursor: viewOnly ? "default" : "none" }}
           onPointerMove={viewOnly ? undefined : handlePointerMove}
