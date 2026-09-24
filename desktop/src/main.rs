@@ -121,7 +121,6 @@ impl eframe::App for RemotaApp {
                         AppState::ControllerWaiting { terminate_tx, .. } => terminate_tx.clone(),
                         _ => continue,
                     };
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1280.0, 760.0)));
                     self.state = AppState::ControllerConnected {
                         frame_buf, input_tx, terminate_tx, texture: None,
                     };
@@ -136,7 +135,6 @@ impl eframe::App for RemotaApp {
                     self.state = AppState::Ended { message };
                 }
                 AppMsg::SessionEnded => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(520.0, 340.0)));
                     self.state = AppState::Ended { message: "Session ended.".to_owned() };
                 }
             }
