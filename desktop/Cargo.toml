@@ -36,7 +36,7 @@ winit = "0.30"
 softbuffer = "0.4"
 
 # HTTP client for room creation (controller side)
-ureq = { version = "2", features = ["native-tls"] }
+ureq = { version = "2", features = ["native-tls", "json"] }
 
 # Utilities
 anyhow = "1"

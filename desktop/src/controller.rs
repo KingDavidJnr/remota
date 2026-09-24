@@ -12,8 +12,8 @@
 //   6. Capture mouse/keyboard from the window → send over DataChannel.
 //   7. End on window close or server terminate.
 
-use std::sync::{Arc, Mutex};
 use std::num::NonZeroU32;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
@@ -24,7 +24,6 @@ use webrtc::{
         media_engine::MediaEngine,
         APIBuilder,
     },
-    ice_transport::ice_server::RTCIceServer,
     interceptor::registry::Registry,
     peer_connection::{
         configuration::RTCConfiguration,
@@ -36,11 +35,12 @@ use webrtc::{
     rtp_transceiver::RTCRtpTransceiverInit,
 };
 use winit::{
+    application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, NamedKey},
-    window::WindowBuilder,
+    window::{Window, WindowId},
 };
 
 use crate::config;
@@ -86,7 +86,6 @@ pub struct FrameBuffer {
 
 // ── VP8 RTP depacketizer ──────────────────────────────────────────────────────
 // Implements RFC 7741 VP8 RTP payload format.
-// Accumulates RTP payload fragments into a complete VP8 bitstream frame.
 
 struct Vp8Depacketizer {
     buf: Vec<u8>,
@@ -97,14 +96,11 @@ impl Vp8Depacketizer {
         Self { buf: Vec::with_capacity(1 << 17) }
     }
 
-    /// Push an RTP payload fragment. Returns the complete VP8 frame bytes
-    /// when the marker bit signals the last packet of the frame.
     fn push(&mut self, payload: &[u8], marker: bool) -> Option<Vec<u8>> {
         if payload.is_empty() {
             return None;
         }
 
-        // Parse VP8 payload descriptor (RFC 7741 §4.2)
         let mut offset = 0usize;
 
         // First byte: X|R|N|S|R|PID[2:0]
@@ -113,7 +109,6 @@ impl Vp8Depacketizer {
         let x_bit = (first & 0x80) != 0;
 
         if x_bit && offset < payload.len() {
-            // Extension byte: I|L|T|K|RSV[3:0]
             let ext = payload[offset];
             offset += 1;
             let i_bit = (ext & 0x80) != 0;
@@ -122,15 +117,14 @@ impl Vp8Depacketizer {
             let k_bit = (ext & 0x10) != 0;
 
             if i_bit && offset < payload.len() {
-                // PictureID: 1 or 2 bytes
                 let m = (payload[offset] & 0x80) != 0;
                 offset += 1;
                 if m && offset < payload.len() {
-                    offset += 1; // second byte of 15-bit PictureID
+                    offset += 1;
                 }
             }
-            if l_bit && offset < payload.len() { offset += 1; } // TL0PICIDX
-            if (t_bit || k_bit) && offset < payload.len() { offset += 1; } // TID/KEYIDX
+            if l_bit && offset < payload.len() { offset += 1; }
+            if (t_bit || k_bit) && offset < payload.len() { offset += 1; }
         }
 
         if offset >= payload.len() {
@@ -150,16 +144,15 @@ impl Vp8Depacketizer {
 
 // ── VP8 decoder ───────────────────────────────────────────────────────────────
 
-use env_libvpx_sys::*;
-
 struct Vp8Decoder {
-    ctx: vpx_codec_ctx_t,
+    ctx: env_libvpx_sys::vpx_codec_ctx_t,
 }
 
 unsafe impl Send for Vp8Decoder {}
 
 impl Vp8Decoder {
     fn new() -> Result<Self> {
+        use env_libvpx_sys::*;
         let mut ctx: vpx_codec_ctx_t = unsafe { std::mem::zeroed() };
         let iface = unsafe { vpx_codec_vp8_dx() };
         let rc = unsafe {
@@ -177,8 +170,8 @@ impl Vp8Decoder {
         Ok(Self { ctx })
     }
 
-    /// Decode one VP8 frame. Returns I420 (YUV planar) image dimensions and data.
     fn decode(&mut self, data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+        use env_libvpx_sys::*;
         let rc = unsafe {
             vpx_codec_decode(
                 &mut self.ctx,
@@ -201,28 +194,26 @@ impl Vp8Decoder {
 
         let w = unsafe { (*img).d_w };
         let h = unsafe { (*img).d_h };
-
-        // Convert I420 → BGRA
-        let bgra = i420_to_bgra(img, w, h);
+        let bgra = unsafe { i420_to_bgra(img, w, h) };
         Some((w, h, bgra))
     }
 }
 
 impl Drop for Vp8Decoder {
     fn drop(&mut self) {
-        unsafe { vpx_codec_destroy(&mut self.ctx); }
+        unsafe { env_libvpx_sys::vpx_codec_destroy(&mut self.ctx); }
     }
 }
 
-/// Convert a libvpx I420 image to packed BGRA.
-unsafe fn i420_to_bgra(img: *const vpx_image_t, w: u32, h: u32) -> Vec<u8> {
+unsafe fn i420_to_bgra(img: *const env_libvpx_sys::vpx_image_t, w: u32, h: u32) -> Vec<u8> {
+    use env_libvpx_sys::*;
     let w = w as usize;
     let h = h as usize;
     let mut out = vec![0u8; w * h * 4];
 
-    let y_plane = (*img).planes[VPX_PLANE_Y as usize];
-    let u_plane = (*img).planes[VPX_PLANE_U as usize];
-    let v_plane = (*img).planes[VPX_PLANE_V as usize];
+    let y_plane  = (*img).planes[VPX_PLANE_Y as usize];
+    let u_plane  = (*img).planes[VPX_PLANE_U as usize];
+    let v_plane  = (*img).planes[VPX_PLANE_V as usize];
     let y_stride = (*img).stride[VPX_PLANE_Y as usize] as usize;
     let u_stride = (*img).stride[VPX_PLANE_U as usize] as usize;
     let v_stride = (*img).stride[VPX_PLANE_V as usize] as usize;
@@ -250,7 +241,6 @@ unsafe fn i420_to_bgra(img: *const vpx_image_t, w: u32, h: u32) -> Vec<u8> {
 // ── Controller entry point ────────────────────────────────────────────────────
 
 pub async fn run_controller() -> Result<()> {
-    // 1. Create room
     let (token, join_url) = create_room().context("create room")?;
 
     println!();
@@ -269,22 +259,15 @@ pub async fn run_controller() -> Result<()> {
 
     let ws_url = format!("{}/ws", config::WS_URL);
 
-    // 2. Connect to signaling as controller
     let (mut signal_rx, signal_tx) = sig_client::connect_as_controller(&ws_url, &token).await?;
     info!("[controller] signaling connected, waiting for participant…");
 
-    // Shared frame buffer between decode task and winit window
     let frame_buf: Arc<Mutex<FrameBuffer>> = Arc::new(Mutex::new(FrameBuffer::default()));
-    let frame_buf_render = Arc::clone(&frame_buf);
-
-    // Channel for control messages from the window to the DataChannel sender
     let (input_tx, mut input_rx) = mpsc::channel::<String>(64);
-
-    // Channel for state updates
     let (state_tx, mut state_rx) = mpsc::channel::<RTCPeerConnectionState>(8);
     let (ice_tx, mut ice_rx) = mpsc::channel::<String>(32);
 
-    // 3. Build WebRTC API
+    // Build WebRTC API
     let mut media = MediaEngine::default();
     media.register_default_codecs().context("register codecs")?;
     let mut registry = Registry::new();
@@ -327,11 +310,10 @@ pub async fn run_controller() -> Result<()> {
         }));
     }
 
-    // DataChannel for sending control messages
+    // DataChannel for control messages
     let dc = pc.create_data_channel("control", None).await?;
     let dc_arc = Arc::clone(&dc);
 
-    // Forward input events to DataChannel once it's open
     tokio::spawn(async move {
         while let Some(msg) = input_rx.recv().await {
             if dc_arc.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
@@ -342,7 +324,7 @@ pub async fn run_controller() -> Result<()> {
         }
     });
 
-    // Video transceiver — recvonly (we receive the participant's screen)
+    // Video transceiver — recvonly
     pc.add_transceiver_from_kind(
         RTPCodecType::Video,
         Some(RTCRtpTransceiverInit {
@@ -367,7 +349,7 @@ pub async fn run_controller() -> Result<()> {
         }));
     }
 
-    // Forward ICE candidates to signaling
+    // Forward ICE candidates
     {
         let sig = signal_tx.clone();
         tokio::spawn(async move {
@@ -380,23 +362,16 @@ pub async fn run_controller() -> Result<()> {
         });
     }
 
-    // Winit proxy — we need to request redraws from the async task
-    // We use a simple atomic flag + a separate thread for the window
-    let redraw_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let redraw_flag_decode = Arc::clone(&redraw_flag);
-
-    // Spawn the winit window on its own thread (winit must run on main thread
-    // or a dedicated thread; we use a dedicated thread here so tokio keeps main)
-    let input_tx_clone = input_tx.clone();
-    let frame_buf_window = Arc::clone(&frame_buf_render);
-    let redraw_flag_window = Arc::clone(&redraw_flag);
-
+    // Spawn winit window on a dedicated thread
+    let input_tx_win = input_tx.clone();
+    let frame_buf_win = Arc::clone(&frame_buf);
     let window_thread = std::thread::spawn(move || {
-        run_window(frame_buf_window, input_tx_clone, redraw_flag_window)
+        run_window(frame_buf_win, input_tx_win);
     });
 
-    // 4. Main signaling event loop — runs until window closes or session ends
+    // Main event loop
     let mut started_offer = false;
+
     loop {
         tokio::select! {
             Some(event) = signal_rx.recv() => {
@@ -409,7 +384,6 @@ pub async fn run_controller() -> Result<()> {
                         let offer = pc.create_offer(None).await?;
                         pc.set_local_description(offer).await?;
 
-                        // Wait for ICE gathering
                         let mut gather = pc.gathering_complete_promise().await;
                         let _ = gather.recv().await;
 
@@ -445,7 +419,7 @@ pub async fn run_controller() -> Result<()> {
             Some(state) = state_rx.recv() => {
                 match state {
                     RTCPeerConnectionState::Connected => {
-                        info!("[controller] connected — screen should appear shortly");
+                        info!("[controller] WebRTC connected — screen should appear");
                     }
                     RTCPeerConnectionState::Failed => {
                         error!("[controller] WebRTC failed");
@@ -456,9 +430,8 @@ pub async fn run_controller() -> Result<()> {
             }
         }
 
-        // Check if the window thread has exited (user closed window)
         if window_thread.is_finished() {
-            info!("[controller] window closed — terminating session");
+            info!("[controller] window closed — terminating");
             let _ = signal_tx.send(r#"{"type":"terminate"}"#.to_owned()).await;
             break;
         }
@@ -502,184 +475,198 @@ async fn run_decode_loop(
     }
 }
 
-// ── Winit window ──────────────────────────────────────────────────────────────
+// ── Winit window (ApplicationHandler pattern) ─────────────────────────────────
 
-fn run_window(
+struct RemotaApp {
     frame_buf: Arc<Mutex<FrameBuffer>>,
     input_tx: mpsc::Sender<String>,
-    redraw_flag: Arc<std::sync::atomic::AtomicBool>,
-) {
-    let event_loop = EventLoop::new().expect("create event loop");
-    let window = Arc::new(
-        WindowBuilder::new()
+    window: Option<Arc<Window>>,
+    surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    current_w: u32,
+    current_h: u32,
+    win_w: f64,
+    win_h: f64,
+}
+
+impl RemotaApp {
+    fn new(frame_buf: Arc<Mutex<FrameBuffer>>, input_tx: mpsc::Sender<String>) -> Self {
+        Self {
+            frame_buf,
+            input_tx,
+            window: None,
+            surface: None,
+            current_w: 1280,
+            current_h: 720,
+            win_w: 1280.0,
+            win_h: 720.0,
+        }
+    }
+}
+
+impl ApplicationHandler for RemotaApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let attrs = Window::default_attributes()
             .with_title("Remota — Remote Desktop")
-            .with_inner_size(PhysicalSize::new(1280u32, 720u32))
-            .build(&event_loop)
-            .expect("create window"),
-    );
+            .with_inner_size(PhysicalSize::new(1280u32, 720u32));
+        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        let context = softbuffer::Context::new(Arc::clone(&window))
+            .expect("softbuffer context");
+        let surface = softbuffer::Surface::new(&context, Arc::clone(&window))
+            .expect("softbuffer surface");
+        self.window = Some(window);
+        self.surface = Some(surface);
+    }
 
-    let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
-    let mut surface = softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
-    let mut current_w = 1280u32;
-    let mut current_h = 720u32;
-
-    // Track window size for normalizing mouse coordinates
-    let mut win_w = 1280.0f64;
-    let mut win_h = 720.0f64;
-
-    event_loop.run(move |event, elwt| {
-        elwt.set_control_flow(ControlFlow::Poll);
-
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => {
-                    elwt.exit();
-                }
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
 
-                WindowEvent::Resized(size) => {
-                    win_w = size.width as f64;
-                    win_h = size.height as f64;
-                }
+            WindowEvent::Resized(size) => {
+                self.win_w = size.width as f64;
+                self.win_h = size.height as f64;
+            }
 
-                WindowEvent::CursorMoved { position, .. } => {
-                    let x = (position.x / win_w).clamp(0.0, 1.0);
-                    let y = (position.y / win_h).clamp(0.0, 1.0);
-                    let msg = serde_json::json!({ "type": "mouse_move", "x": x, "y": y });
-                    let _ = input_tx.try_send(msg.to_string());
-                }
+            WindowEvent::CursorMoved { position, .. } => {
+                let x = (position.x / self.win_w).clamp(0.0, 1.0);
+                let y = (position.y / self.win_h).clamp(0.0, 1.0);
+                let msg = serde_json::json!({ "type": "mouse_move", "x": x, "y": y });
+                let _ = self.input_tx.try_send(msg.to_string());
+            }
 
-                WindowEvent::MouseInput { button, state, .. } => {
-                    let btn = match button {
-                        MouseButton::Left   => "left",
-                        MouseButton::Right  => "right",
-                        MouseButton::Middle => "middle",
-                        _ => return,
-                    };
-                    let action = if state == ElementState::Pressed { "down" } else { "up" };
-                    let msg = serde_json::json!({
-                        "type": "mouse_button",
-                        "action": action,
-                        "button": btn
-                    });
-                    let _ = input_tx.try_send(msg.to_string());
-                }
+            WindowEvent::MouseInput { button, state, .. } => {
+                let btn = match button {
+                    MouseButton::Left   => "left",
+                    MouseButton::Right  => "right",
+                    MouseButton::Middle => "middle",
+                    _ => return,
+                };
+                let action = if state == ElementState::Pressed { "down" } else { "up" };
+                let msg = serde_json::json!({
+                    "type": "mouse_button", "action": action, "button": btn
+                });
+                let _ = self.input_tx.try_send(msg.to_string());
+            }
 
-                WindowEvent::MouseWheel { delta, .. } => {
-                    let (dx, dy) = match delta {
-                        MouseScrollDelta::LineDelta(x, y) => (x as f64 * 40.0, y as f64 * 40.0),
-                        MouseScrollDelta::PixelDelta(p)   => (p.x, p.y),
-                    };
-                    let msg = serde_json::json!({ "type": "scroll", "deltaX": dx, "deltaY": -dy });
-                    let _ = input_tx.try_send(msg.to_string());
-                }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x as f64 * 40.0, y as f64 * 40.0),
+                    MouseScrollDelta::PixelDelta(p)   => (p.x, p.y),
+                };
+                let msg = serde_json::json!({ "type": "scroll", "deltaX": dx, "deltaY": -dy });
+                let _ = self.input_tx.try_send(msg.to_string());
+            }
 
-                WindowEvent::KeyboardInput { event: key_event, .. } => {
-                    let action = if key_event.state == ElementState::Pressed { "down" } else { "up" };
-                    let key_str = match &key_event.logical_key {
-                        Key::Named(n) => named_key_to_str(n),
-                        Key::Character(c) => c.as_str().to_owned(),
-                        _ => return,
-                    };
-                    let msg = serde_json::json!({
-                        "type": "keyboard",
-                        "action": action,
-                        "key": key_str
-                    });
-                    let _ = input_tx.try_send(msg.to_string());
-                }
+            WindowEvent::KeyboardInput { event: key_event, .. } => {
+                let action = if key_event.state == ElementState::Pressed { "down" } else { "up" };
+                let key_str = match &key_event.logical_key {
+                    Key::Named(n) => named_key_to_str(n),
+                    Key::Character(c) => c.as_str().to_owned(),
+                    _ => return,
+                };
+                if key_str.is_empty() { return; }
+                let msg = serde_json::json!({
+                    "type": "keyboard", "action": action, "key": key_str
+                });
+                let _ = self.input_tx.try_send(msg.to_string());
+            }
 
-                WindowEvent::RedrawRequested => {
-                    let fb = frame_buf.lock().unwrap();
-                    if fb.width == 0 || fb.height == 0 || fb.data.is_empty() {
-                        return;
+            WindowEvent::RedrawRequested => {
+                let surface = match self.surface.as_mut() { Some(s) => s, None => return };
+                let fb = self.frame_buf.lock().unwrap();
+                if fb.width == 0 || fb.height == 0 || fb.data.is_empty() { return; }
+
+                let w = fb.width;
+                let h = fb.height;
+
+                if w != self.current_w || h != self.current_h {
+                    if let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) {
+                        let _ = surface.resize(nw, nh);
+                        self.current_w = w;
+                        self.current_h = h;
                     }
+                }
 
-                    let w = fb.width;
-                    let h = fb.height;
-
-                    if w != current_w || h != current_h {
-                        surface.resize(
-                            NonZeroU32::new(w).unwrap(),
-                            NonZeroU32::new(h).unwrap(),
-                        ).unwrap();
-                        current_w = w;
-                        current_h = h;
-                    }
-
-                    let mut buf = surface.buffer_mut().unwrap();
-                    // softbuffer on Windows uses 0x00RRGGBB
-                    // our frame is BGRA packed
+                if let Ok(mut buf) = surface.buffer_mut() {
                     for (i, pixel) in buf.iter_mut().enumerate() {
                         let base = i * 4;
-                        if base + 3 < fb.data.len() {
+                        if base + 2 < fb.data.len() {
                             let b = fb.data[base]     as u32;
                             let g = fb.data[base + 1] as u32;
                             let r = fb.data[base + 2] as u32;
+                            // softbuffer on Windows: 0x00RRGGBB
                             *pixel = (r << 16) | (g << 8) | b;
                         }
                     }
-                    buf.present().unwrap();
-                }
-
-                _ => {}
-            }
-
-            Event::AboutToWait => {
-                // Check if a new frame is available
-                let dirty = {
-                    let mut fb = frame_buf.lock().unwrap();
-                    let d = fb.dirty;
-                    fb.dirty = false;
-                    d
-                };
-                if dirty {
-                    window.request_redraw();
+                    let _ = buf.present();
                 }
             }
 
             _ => {}
         }
-    }).expect("event loop error");
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        let dirty = {
+            let mut fb = self.frame_buf.lock().unwrap();
+            let d = fb.dirty;
+            fb.dirty = false;
+            d
+        };
+        if dirty {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+}
+
+fn run_window(frame_buf: Arc<Mutex<FrameBuffer>>, input_tx: mpsc::Sender<String>) {
+    let event_loop = EventLoop::new().expect("create event loop");
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let mut app = RemotaApp::new(frame_buf, input_tx);
+    event_loop.run_app(&mut app).expect("event loop error");
 }
 
 fn named_key_to_str(key: &NamedKey) -> String {
     match key {
-        NamedKey::Enter       => "Enter",
-        NamedKey::Backspace   => "Backspace",
-        NamedKey::Delete      => "Delete",
-        NamedKey::Escape      => "Escape",
-        NamedKey::Tab         => "Tab",
-        NamedKey::Space       => " ",
-        NamedKey::ArrowUp     => "ArrowUp",
-        NamedKey::ArrowDown   => "ArrowDown",
-        NamedKey::ArrowLeft   => "ArrowLeft",
-        NamedKey::ArrowRight  => "ArrowRight",
-        NamedKey::Home        => "Home",
-        NamedKey::End         => "End",
-        NamedKey::PageUp      => "PageUp",
-        NamedKey::PageDown    => "PageDown",
-        NamedKey::F1          => "F1",
-        NamedKey::F2          => "F2",
-        NamedKey::F3          => "F3",
-        NamedKey::F4          => "F4",
-        NamedKey::F5          => "F5",
-        NamedKey::F6          => "F6",
-        NamedKey::F7          => "F7",
-        NamedKey::F8          => "F8",
-        NamedKey::F9          => "F9",
-        NamedKey::F10         => "F10",
-        NamedKey::F11         => "F11",
-        NamedKey::F12         => "F12",
-        NamedKey::Shift       => "Shift",
-        NamedKey::Control     => "Control",
-        NamedKey::Alt         => "Alt",
-        NamedKey::Meta        => "Meta",
-        NamedKey::CapsLock    => "CapsLock",
-        _                     => return String::new(),
+        NamedKey::Enter      => "Enter",
+        NamedKey::Backspace  => "Backspace",
+        NamedKey::Delete     => "Delete",
+        NamedKey::Escape     => "Escape",
+        NamedKey::Tab        => "Tab",
+        NamedKey::Space      => " ",
+        NamedKey::ArrowUp    => "ArrowUp",
+        NamedKey::ArrowDown  => "ArrowDown",
+        NamedKey::ArrowLeft  => "ArrowLeft",
+        NamedKey::ArrowRight => "ArrowRight",
+        NamedKey::Home       => "Home",
+        NamedKey::End        => "End",
+        NamedKey::PageUp     => "PageUp",
+        NamedKey::PageDown   => "PageDown",
+        NamedKey::F1         => "F1",
+        NamedKey::F2         => "F2",
+        NamedKey::F3         => "F3",
+        NamedKey::F4         => "F4",
+        NamedKey::F5         => "F5",
+        NamedKey::F6         => "F6",
+        NamedKey::F7         => "F7",
+        NamedKey::F8         => "F8",
+        NamedKey::F9         => "F9",
+        NamedKey::F10        => "F10",
+        NamedKey::F11        => "F11",
+        NamedKey::F12        => "F12",
+        NamedKey::Shift      => "Shift",
+        NamedKey::Control    => "Control",
+        NamedKey::Alt        => "Alt",
+        NamedKey::Meta       => "Meta",
+        NamedKey::CapsLock   => "CapsLock",
+        _                    => return String::new(),
     }.to_owned()
 }
 
-// ── Controller signaling ──────────────────────────────────────────────────────
+// ── Controller signaling event type ──────────────────────────────────────────
 
 #[derive(Debug)]
 pub enum ControllerSignalEvent {
