@@ -95,6 +95,23 @@ export default function ControllerRoom() {
               log(`play failed: ${err}`);
               setNeedsTap(true);
             });
+            // Single stats check 3s after attachment
+            const pc = pcRef.current;
+            if (pc) {
+              setTimeout(async () => {
+                try {
+                  const stats = await pc.getStats(track);
+                  let found = false;
+                  stats.forEach((r) => {
+                    if (r.type === "inbound-rtp" && r.kind === "video") {
+                      found = true;
+                      log(`3s check: pkts=${r.packetsReceived} decoded=${r.framesDecoded ?? "?"}`);
+                    }
+                  });
+                  if (!found) log("3s check: no inbound-rtp video entry");
+                } catch { /* ignore */ }
+              }, 3000);
+            }
           });
         }
         // CONTRACT: The server sends "terminate" to tell us the session is over.
