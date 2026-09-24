@@ -91,6 +91,7 @@ export default function ControllerRoom() {
             const track = pendingVideoTrackRef.current;
             if (!v || !track || videoAttachedRef.current) return;
             videoAttachedRef.current = true;
+            log(`attach: rs=${track.readyState} muted=${track.muted}`);
             v.srcObject = new MediaStream([track]);
             v.play()
               .then(() => log("video playing OK"))
@@ -161,7 +162,9 @@ export default function ControllerRoom() {
       }
 
       pc.ontrack = (e) => {
-        log(`ontrack: ${e.track.kind} readyState=${e.track.readyState}`);
+        const dir = e.transceiver?.direction ?? "?";
+        const curDir = e.transceiver?.currentDirection ?? "?";
+        log(`ontrack: ${e.track.kind} rs=${e.track.readyState} dir=${dir} cur=${curDir}`);
         if (e.track.kind === "video") {
           pendingVideoTrackRef.current = e.track;
           setTimeout(() => {
