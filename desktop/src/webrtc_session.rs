@@ -128,12 +128,10 @@ impl Session {
                     let state = dc.ready_state();
                     info!("[webrtc] DataChannel '{label}' received, state={state:?}");
 
-                    // Register on_message immediately — the channel may already
-                    // be open by the time on_data_channel fires (SCTP Established
-                    // before the callback runs). on_open is not guaranteed to fire
-                    // if the channel is already open.
+                    // Register on_message. The DataChannel may already be
+                    // open by the time on_data_channel fires, so we register
+                    // immediately without waiting for on_open.
                     let ctrl_msg = ctrl.clone();
-                    let dc_msg = Arc::clone(&dc);
                     dc.on_message(Box::new(move |msg| {
                         let ctrl = ctrl_msg.clone();
                         let data = msg.data.clone();
@@ -146,24 +144,21 @@ impl Session {
                     }));
                     info!("[webrtc] DataChannel '{label}' on_message registered");
 
-                    // Also hook on_open in case it fires later.
                     let label2 = label.clone();
                     dc.on_open(Box::new(move || {
                         info!("[webrtc] DataChannel '{label2}' on_open fired");
                         Box::pin(async {})
                     }));
 
-                    // Keep dc alive until the channel closes.
-                    let close_notify = Arc::new(tokio::sync::Notify::new());
-                    let cn = Arc::clone(&close_notify);
+                    let label3 = label.clone();
                     dc.on_close(Box::new(move || {
-                        cn.notify_one();
+                        info!("[webrtc] DataChannel '{label3}' closed");
                         Box::pin(async {})
                     }));
-                    // dc_msg keeps the Arc alive alongside the close wait.
-                    let _keep_alive = dc_msg;
-                    close_notify.notified().await;
-                    info!("[webrtc] DataChannel '{label}' closed");
+                    // Do NOT block here waiting for close — doing so would stall
+                    // the on_data_channel handler task, which in webrtc-rs prevents
+                    // the DataChannel from ever transitioning to Open state and
+                    // causes on_message to never fire.
                 })
             }));
         }

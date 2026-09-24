@@ -198,11 +198,14 @@ pub async fn run_controller_async(
     })); }
 
     let dc = pc.create_data_channel("control", None).await?;
-    let dc2 = Arc::clone(&dc);
+    // Clone for the send task. Both dc and dc_send must be kept alive for the
+    // duration of the session — dropping dc would remove the strong reference
+    // that the peer connection needs to keep the DataChannel open.
+    let dc_send = Arc::clone(&dc);
     tokio::spawn(async move {
         while let Some(msg) = input_rx.recv().await {
-            if dc2.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
-                let _ = dc2.send_text(msg).await;
+            if dc_send.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
+                let _ = dc_send.send_text(msg).await;
             }
         }
     });
