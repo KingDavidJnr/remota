@@ -196,12 +196,22 @@ impl Session {
             .await
             .context("add video track in handle_offer")?;
 
+        // Drain RTCP from the sender. webrtc-rs interceptors (NACK, TWCC, etc.)
+        // write RTCP feedback into the sender's read buffer. If it is never read,
+        // the buffer fills and back-pressures the entire RTP pipeline causing the
+        // video to freeze. This task runs for the lifetime of the sender.
+        tokio::spawn(async move {
+            let mut rtcp_buf = vec![0u8; 1500];
+            while sender.read(&mut rtcp_buf).await.is_ok() {}
+        });
+
         let answer = self.pc.create_answer(None).await?;
-        // set_local_description first — ICE gathering only starts after this call.
-        // The promise must be obtained after set_local_description so that it
-        // waits for the gathering that was just triggered, not a stale one.
-        self.pc.set_local_description(answer).await?;
+        // In webrtc-rs 0.13, gathering_complete_promise() MUST be obtained
+        // before set_local_description. ICE gathering starts when SLD is called
+        // and the internal sender fires on completion — if you subscribe after,
+        // you miss the signal and recv() blocks forever.
         let mut gather_complete = self.pc.gathering_complete_promise().await;
+        self.pc.set_local_description(answer).await?;
         let _ = gather_complete.recv().await;
 
         let local = self.pc

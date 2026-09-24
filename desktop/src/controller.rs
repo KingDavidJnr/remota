@@ -210,10 +210,16 @@ pub async fn run_controller_async(
     })).await?;
 
     { let fb = Arc::clone(&frame_buf); let ctx2 = ctx.clone();
-      pc.on_track(Box::new(move |track, _, _| {
+      pc.on_track(Box::new(move |track, receiver, _| {
         let fb = Arc::clone(&fb); let ctx3 = ctx2.clone();
         Box::pin(async move {
             if track.kind() == RTPCodecType::Video {
+                // Drain RTCP feedback (PLI, RR, etc.) from the receiver so the
+                // interceptor pipeline does not back-pressure and stall RTP.
+                tokio::spawn(async move {
+                    let mut rtcp_buf = vec![0u8; 1500];
+                    while receiver.read(&mut rtcp_buf).await.is_ok() {}
+                });
                 tokio::spawn(async move { run_decode_loop(track, fb, ctx3).await; });
             }
         })
@@ -252,10 +258,14 @@ pub async fn run_controller_async(
                             Ok(o) => o,
                             Err(e) => { error!("[controller] create_offer failed: {e}"); return; }
                         };
+                        // In webrtc-rs 0.13, gathering_complete_promise() MUST be
+                        // obtained BEFORE set_local_description. The internal
+                        // mpsc sender fires on ICE completion — subscribe first or
+                        // recv() will block forever having missed the signal.
+                        let mut gather = pc2.gathering_complete_promise().await;
                         if let Err(e) = pc2.set_local_description(offer).await {
                             error!("[controller] set_local_description failed: {e}"); return;
                         }
-                        let mut gather = pc2.gathering_complete_promise().await;
                         let _ = gather.recv().await;
                         let local = match pc2.local_description().await {
                             Some(d) => d,
