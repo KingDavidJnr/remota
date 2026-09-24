@@ -304,7 +304,8 @@ impl eframe::App for RemotaApp {
                                 let disp = ts * scale;
 
                                 let resp = ui.add(
-                                    egui::Image::new(tex.id(), disp)
+                                    egui::Image::new(tex)
+                                        .fit_to_exact_size(disp)
                                         .sense(egui::Sense::click_and_drag()),
                                 );
 
@@ -472,7 +473,7 @@ impl RemotaApp {
             }
             Ok((token, join_url)) => {
                 let token2 = token.clone();
-                let join_url2 = join_url.clone();
+                let _join_url2 = join_url.clone();
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
