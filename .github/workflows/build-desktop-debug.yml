@@ -1,0 +1,87 @@
+name: Build Windows Desktop (Debug)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows-debug:
+    name: Build remota-desktop-debug.exe
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/target
+          key: windows-cargo-debug-${{ hashFiles('desktop/Cargo.lock') }}
+          restore-keys: windows-cargo-debug-
+
+      - name: Install libvpx via vcpkg
+        run: |
+          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
+          Write-Output "vcpkg: $vcpkg"
+
+          & "$vcpkg\vcpkg.exe" install "libvpx:x64-windows-static"
+
+          $libDir     = "$vcpkg\installed\x64-windows-static\lib"
+          $includeDir = "$vcpkg\installed\x64-windows-static\include"
+
+          $vpxLib    = Join-Path $libDir "vpx.lib"
+          $libvpxLib = Join-Path $libDir "libvpx.lib"
+          if ((Test-Path $vpxLib) -and -not (Test-Path $libvpxLib)) {
+            Copy-Item $vpxLib $libvpxLib
+            Write-Output "Copied vpx.lib -> libvpx.lib"
+          }
+
+          $vpxVersion = (& "$vcpkg\vcpkg.exe" list libvpx 2>&1) |
+            Select-String "libvpx:x64-windows-static" |
+            ForEach-Object { ($_ -split '\s+')[1] } |
+            Select-Object -First 1
+
+          if (-not $vpxVersion) { $vpxVersion = "1.14.0" }
+          Write-Output "libvpx version: $vpxVersion"
+
+          echo "VPX_LIB_DIR=$libDir" >> $env:GITHUB_ENV
+          echo "VPX_INCLUDE_DIR=$includeDir" >> $env:GITHUB_ENV
+          echo "VPX_STATIC=1" >> $env:GITHUB_ENV
+          echo "VPX_VERSION=$vpxVersion" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Build debug binary
+        env:
+          REMOTA_WS_URL: wss://api.remota.quickdesk.tech
+          REMOTA_WEB_URL: https://remota.quickdesk.tech
+          REMOTA_TURN_URL: turn:turn.remota.quickdesk.tech:3478
+          REMOTA_TURN_USER: ${{ secrets.REMOTA_TURN_USER }}
+          REMOTA_TURN_PASS: ${{ secrets.REMOTA_TURN_PASS }}
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          Write-Output "VPX_LIB_DIR=$env:VPX_LIB_DIR"
+          Write-Output "VPX_INCLUDE_DIR=$env:VPX_INCLUDE_DIR"
+          cargo build `
+            --manifest-path desktop/Cargo.toml `
+            --target x86_64-pc-windows-msvc
+        shell: pwsh
+
+      - name: Rename binary
+        run: |
+          Copy-Item "desktop/target/x86_64-pc-windows-msvc/debug/remota-desktop.exe" "remota-desktop-debug.exe"
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: remota-desktop-debug-windows
+          path: remota-desktop-debug.exe
+          retention-days: 7
