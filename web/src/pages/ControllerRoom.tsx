@@ -21,13 +21,9 @@ export default function ControllerRoom() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const keyInputRef = useRef<HTMLInputElement>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
-  // Holds the incoming video track until the desktop sends "active".
-  // We defer srcObject assignment so the browser only starts decoding after
-  // the desktop has sent a fresh keyframe post-connect, preventing blank screen.
+  // Holds the incoming video track. Set by ontrack, consumed by attachVideo().
   const pendingVideoTrackRef = useRef<MediaStreamTrack | null>(null);
-  // Set to true when the "active" signal is received from the desktop.
-  // A separate useEffect watches this + videoRef to assign srcObject once
-  // both the track and the DOM video element are available.
+  // Set to true when the "active" signal arrives from the desktop.
   const [videoReady, setVideoReady] = useState(false);
 
   const [status, setStatus] = useState<"waiting" | "connecting" | "connected" | "ended">("waiting");
@@ -208,18 +204,18 @@ export default function ControllerRoom() {
     }
   }, [token, navigate]);
 
-  // ── Attach video stream once the DOM element is mounted and stream is ready ──
-  // The "active" signal sets videoReady=true and status="connected". The status
-  // change causes the <video> element to appear in the DOM. This effect runs
-  // after that re-render, so videoRef.current is guaranteed to be non-null.
-  useEffect(() => {
-    if (!videoReady) return;
-    const v = videoRef.current;
+  // ── Attach video to the <video> element ───────────────────────────────────
+  // Called from two places: the ref callback when the video element mounts,
+  // and the active message handler. Whichever fires second will find both the
+  // DOM element and the track ready and complete the attachment.
+  function attachVideo(v: HTMLVideoElement | null) {
+    if (!v) return;
     const track = pendingVideoTrackRef.current;
-    if (!v || !track) {
-      log(`video attach skipped: v=${v ? "ok" : "null"} track=${track ? "ok" : "null"}`);
+    if (!track) {
+      log("video element ready, waiting for active signal");
       return;
     }
+    log("attaching video stream");
     v.srcObject = new MediaStream([track]);
     v.muted = true;
     v.play()
@@ -236,7 +232,13 @@ export default function ControllerRoom() {
           v.play().then(() => { v.muted = false; }).catch(() => {});
         }
       });
-  }, [videoReady]);
+  }
+
+  // When videoReady becomes true, the <video> element is already in the DOM
+  // (same render batch as setStatus("connected")). Run attachVideo now.
+  useEffect(() => {
+    if (videoReady) attachVideo(videoRef.current);
+  }, [videoReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Mic toggle ────────────────────────────────────────────────────────────
   function handleMicToggle() {
@@ -611,7 +613,12 @@ export default function ControllerRoom() {
           </div>
         )}
         <video
-          ref={videoRef}
+          ref={(el) => {
+            // Store in videoRef for event handlers, and attempt to attach
+            // the video stream if it's already ready (active arrived first).
+            (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
+            if (videoReady) attachVideo(el);
+          }}
           autoPlay
           playsInline
           muted={needsTap} // muted until user gesture unlocks audio
