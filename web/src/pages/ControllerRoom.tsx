@@ -84,8 +84,7 @@ export default function ControllerRoom() {
             if (!v || !track || videoAttachedRef.current) return;
             videoAttachedRef.current = true;
             v.srcObject = new MediaStream([track]);
-            v.play().catch((err: unknown) => {
-              log(`play failed: ${err}`);
+            v.play().catch(() => {
               setNeedsTap(true);
             });
           });
