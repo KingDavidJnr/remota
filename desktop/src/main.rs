@@ -304,7 +304,7 @@ impl eframe::App for RemotaApp {
                                 let disp = ts * scale;
 
                                 let resp = ui.add(
-                                    egui::Image::new(tex)
+                                    egui::Image::new(&*tex)
                                         .fit_to_exact_size(disp)
                                         .sense(egui::Sense::click_and_drag()),
                                 );
