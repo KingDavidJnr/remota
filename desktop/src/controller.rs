@@ -274,8 +274,9 @@ pub async fn run_controller() -> Result<()> {
     let fb_win = Arc::clone(&frame_buf);
     let itx_win = input_tx.clone();
     let join_url_win = join_url.clone();
+    let token_win = token.clone();
     let window_thread = std::thread::spawn(move || {
-        run_controller_window(fb_win, itx_win, join_url_win);
+        run_controller_window(fb_win, itx_win, join_url_win, token_win);
     });
 
     // Main loop
@@ -363,6 +364,7 @@ fn run_controller_window(
     frame_buf: Arc<Mutex<FrameBuffer>>,
     input_tx: mpsc::Sender<String>,
     join_url: String,
+    token: String,
 ) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -378,6 +380,7 @@ fn run_controller_window(
             frame_buf,
             input_tx,
             join_url,
+            token,
             texture: None,
             connected: false,
         }))),
@@ -388,6 +391,7 @@ struct ControllerWindow {
     frame_buf: Arc<Mutex<FrameBuffer>>,
     input_tx: mpsc::Sender<String>,
     join_url: String,
+    token: String,
     texture: Option<egui::TextureHandle>,
     connected: bool,
 }
@@ -432,20 +436,37 @@ impl eframe::App for ControllerWindow {
             .frame(egui::Frame::none().fill(egui::Color32::BLACK))
             .show(ctx, |ui| {
                 if !self.connected {
-                    // Waiting screen — show the join URL
                     ui.vertical_centered(|ui| {
-                        ui.add_space(80.0);
+                        ui.add_space(40.0);
                         ui.label(egui::RichText::new("Waiting for participant…")
                             .size(20.0).color(egui::Color32::WHITE));
-                        ui.add_space(24.0);
-                        ui.label(egui::RichText::new("Share this link:")
-                            .color(egui::Color32::GRAY));
-                        ui.add_space(8.0);
-                        ui.add(egui::TextEdit::singleline(&mut self.join_url.clone())
-                            .desired_width(500.0)
+                        ui.add_space(28.0);
+
+                        // Session token — paste this into the app
+                        ui.label(egui::RichText::new("Session token (paste in the Remota app):")
+                            .color(egui::Color32::GRAY).size(13.0));
+                        ui.add_space(4.0);
+                        ui.add(egui::TextEdit::singleline(&mut self.token.clone())
+                            .desired_width(440.0)
                             .font(egui::TextStyle::Monospace));
-                        ui.add_space(8.0);
-                        if ui.button("📋 Copy link").clicked() {
+                        ui.add_space(4.0);
+                        if ui.button("📋  Copy token").clicked() {
+                            ctx.copy_text(self.token.clone());
+                        }
+
+                        ui.add_space(20.0);
+                        ui.separator();
+                        ui.add_space(12.0);
+
+                        // Full invite link — open in browser
+                        ui.label(egui::RichText::new("Or share this link:")
+                            .color(egui::Color32::GRAY).size(13.0));
+                        ui.add_space(4.0);
+                        ui.add(egui::TextEdit::singleline(&mut self.join_url.clone())
+                            .desired_width(440.0)
+                            .font(egui::TextStyle::Monospace));
+                        ui.add_space(4.0);
+                        if ui.button("📋  Copy link").clicked() {
                             ctx.copy_text(self.join_url.clone());
                         }
                     });
