@@ -227,9 +227,9 @@ impl Session {
             loop {
                 match sender_rtcp.read(&mut rtcp_buf).await {
                     Ok((n, _)) => {
-                        // Attempt to deserialise as REMB. webrtc-rs returns
-                        // a slice of RTCP packets; try each one.
-                        if let Ok(pkts) = webrtc::rtcp::packet::unmarshal(&rtcp_buf[..n]) {
+                        // unmarshal expects &mut impl Bytes — use a bytes::Bytes slice.
+                        let mut buf = bytes::Bytes::copy_from_slice(&rtcp_buf[..n]);
+                        if let Ok(pkts) = webrtc::rtcp::packet::unmarshal(&mut buf) {
                             for pkt in pkts {
                                 if let Some(remb) = pkt.as_any()
                                     .downcast_ref::<ReceiverEstimatedMaximumBitrate>()
