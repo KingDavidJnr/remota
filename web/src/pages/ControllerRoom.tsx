@@ -173,11 +173,9 @@ export default function ControllerRoom() {
         }
       };
 
-      pc.onicecandidate = (e) => {
-        if (e.candidate) {
-          sig.send({ type: "ice_candidate", candidate: e.candidate.toJSON() });
-        }
-      };
+      // ICE candidates are bundled into the complete offer above.
+      // No trickle needed.
+      pc.onicecandidate = null;
 
       // CONTRACT: Only WebRTC "failed" is unrecoverable.
       // "disconnected" is transient — do NOT terminate on it.
@@ -191,6 +189,26 @@ export default function ControllerRoom() {
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+
+      // Wait for ICE gathering to complete before sending the offer.
+      // Trickle-ICE is unreliable on high-latency signaling paths (Lagos →
+      // us-east-2) — the answer may arrive before all candidates are exchanged,
+      // causing ICE to fail or time out. Sending a complete offer with all
+      // candidates already embedded is far more reliable.
+      await new Promise<void>((resolve) => {
+        if (pc.iceGatheringState === "complete") {
+          resolve();
+          return;
+        }
+        const check = () => {
+          if (pc.iceGatheringState === "complete") {
+            pc.removeEventListener("icegatheringstatechange", check);
+            resolve();
+          }
+        };
+        pc.addEventListener("icegatheringstatechange", check);
+      });
+
       sig.send({ type: "offer", sdp: pc.localDescription });
     }
 

@@ -29,6 +29,7 @@ use webrtc::{
         sdp::session_description::RTCSessionDescription,
         RTCPeerConnection,
     },
+    rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate,
     rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
     track::track_local::{
         track_local_static_sample::TrackLocalStaticSample, TrackLocal,
@@ -89,6 +90,8 @@ pub fn build_api() -> Result<webrtc::api::API> {
 pub struct Session {
     pub pc: Arc<RTCPeerConnection>,
     pub video_track: Arc<TrackLocalStaticSample>,
+    /// Sends REMB-derived bitrate estimates (kbps) to the encoding loop.
+    pub remb_tx: tokio::sync::watch::Sender<u32>,
 }
 
 impl Session {
@@ -114,6 +117,8 @@ impl Session {
             "video".to_owned(),
             "remota-screen".to_owned(),
         ));
+
+        let (remb_tx, _) = tokio::sync::watch::channel(INITIAL_BITRATE_KBPS);
 
         // Track is added in handle_offer() after set_remote_description()
         // so it correctly maps to the controller's recvonly transceiver slot.
@@ -194,7 +199,7 @@ impl Session {
             }));
         }
 
-        Ok(Self { pc, video_track })
+        Ok(Self { pc, video_track, remb_tx })
     }
 
     pub async fn handle_offer(&self, sdp: &str) -> Result<RTCSessionDescription> {
@@ -213,11 +218,34 @@ impl Session {
             .await
             .context("add video track before set_remote_description")?;
 
-        // Drain RTCP from the sender so the interceptor pipeline never stalls.
+        // Read RTCP from the sender. Parse REMB packets and forward the
+        // estimated bitrate to the encoding loop so it can adapt.
         let sender_rtcp = Arc::clone(&sender);
+        let remb_tx_clone = self.remb_tx.clone();
         tokio::spawn(async move {
             let mut rtcp_buf = vec![0u8; 1500];
-            while sender_rtcp.read(&mut rtcp_buf).await.is_ok() {}
+            loop {
+                match sender_rtcp.read(&mut rtcp_buf).await {
+                    Ok((n, _)) => {
+                        // Attempt to deserialise as REMB. webrtc-rs returns
+                        // a slice of RTCP packets; try each one.
+                        if let Ok(pkts) = webrtc::rtcp::packet::unmarshal(&rtcp_buf[..n]) {
+                            for pkt in pkts {
+                                if let Some(remb) = pkt.as_any()
+                                    .downcast_ref::<ReceiverEstimatedMaximumBitrate>()
+                                {
+                                    // REMB bitrate is in bps — convert to kbps and
+                                    // clamp to [MIN_BITRATE_KBPS, MAX_BITRATE_KBPS].
+                                    let kbps = ((remb.bitrate / 1000.0) as u32)
+                                        .clamp(MIN_BITRATE_KBPS, MAX_BITRATE_KBPS);
+                                    let _ = remb_tx_clone.send(kbps);
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
         });
 
         self.pc.set_remote_description(offer).await?;
@@ -260,7 +288,9 @@ impl Session {
 // BGRA → I420 (YUV planar) → VP8 bitstream → WebRTC Sample
 
 const TARGET_FPS: u32 = 30;
-const TARGET_BITRATE_KBPS: u32 = 2000;
+const INITIAL_BITRATE_KBPS: u32 = 1000;
+const MIN_BITRATE_KBPS: u32 = 200;
+const MAX_BITRATE_KBPS: u32 = 2000;
 
 /// Spawns a dedicated OS thread for VP8 encoding (encoder is !Send so it cannot
 /// live in a tokio task across await points). The thread encodes frames and sends
@@ -269,13 +299,18 @@ const TARGET_BITRATE_KBPS: u32 = 2000;
 /// Encoding does not begin until `connected_rx` is true. This ensures the RTP
 /// sender is bound before any write_sample call, avoiding pre-connection errors
 /// that would otherwise accumulate and kill the write task.
+///
+/// `bitrate_rx` carries REMB-derived bitrate estimates (kbps) from the RTCP
+/// reader. The encoding thread polls it on every frame and reconfigures the
+/// VP8 encoder when the estimate changes.
 pub async fn run_encoding_loop(
     track: Arc<TrackLocalStaticSample>,
     mut frame_rx: mpsc::Receiver<CapturedFrame>,
     force_keyframe: Arc<std::sync::atomic::AtomicBool>,
     mut connected_rx: tokio::sync::watch::Receiver<bool>,
+    mut bitrate_rx: tokio::sync::watch::Receiver<u32>,
 ) {
-    info!("[encode] encoding loop started ({TARGET_FPS} fps, {TARGET_BITRATE_KBPS} kbps)");
+    info!("[encode] encoding loop started ({TARGET_FPS} fps, initial={INITIAL_BITRATE_KBPS} kbps)");
 
     // Wait until the peer connection reaches Connected before consuming any frames.
     // This prevents write_sample from being called before the RTP sender is bound.
@@ -304,6 +339,7 @@ pub async fn run_encoding_loop(
         let mut encoder: Option<Encoder> = None;
         let mut last_w: u32 = 0;
         let mut last_h: u32 = 0;
+        let mut current_bitrate_kbps: u32 = INITIAL_BITRATE_KBPS;
         let mut frame_idx: i64 = 0;
         let mut frames_received: u64 = 0;
         let mut packets_sent: u64 = 0;
@@ -312,6 +348,18 @@ pub async fn run_encoding_loop(
         while let Some(frame) = handle.block_on(frame_rx.recv()) {
             frames_received += 1;
             let log_this = frames_received == 1 || frames_received % 150 == 0;
+
+            // Check for a new REMB bitrate estimate without blocking.
+            if bitrate_rx.has_changed().unwrap_or(false) {
+                let new_kbps = *bitrate_rx.borrow_and_update();
+                if new_kbps != current_bitrate_kbps {
+                    current_bitrate_kbps = new_kbps;
+                    // Force an encoder rebuild with the new bitrate on the next frame.
+                    // Resetting last_w triggers the existing rebuild path.
+                    last_w = 0;
+                    info!("[encode] REMB bitrate → {current_bitrate_kbps} kbps");
+                }
+            }
 
             let capture_w = frame.width;
             let capture_h = frame.height;
@@ -350,7 +398,7 @@ pub async fn run_encoding_loop(
 
             // Rebuild encoder if needed (dimensions changed or forced keyframe reset)
             if encoder.is_none() || w != last_w || h != last_h {
-                match build_encoder(w, h) {
+                match build_encoder(w, h, current_bitrate_kbps) {
                     Ok(e) => {
                         info!("[encode] encoder (re)built ({w}x{h})");
                         encoder = Some(e);
@@ -432,7 +480,7 @@ pub async fn run_encoding_loop(
     info!("[encode] encoding loop exited — write_count={write_count} write_error_count={write_error_count}");
 }
 
-fn build_encoder(width: u32, height: u32) -> Result<Encoder, VpxError> {
+fn build_encoder(width: u32, height: u32, bitrate_kbps: u32) -> Result<Encoder, VpxError> {
     let cfg = Config {
         width,
         height,
@@ -440,7 +488,7 @@ fn build_encoder(width: u32, height: u32) -> Result<Encoder, VpxError> {
         // and is known to work. timebase [1, 30] causes VPX_CODEC_INVALID_PARAM
         // with libvpx 1.14 on Windows.
         timebase: [1, 1_000_000],
-        bitrate: TARGET_BITRATE_KBPS,
+        bitrate: bitrate_kbps,
         codec: VideoCodecId::VP8,
     };
     Encoder::new(cfg)

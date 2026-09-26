@@ -514,7 +514,8 @@ async fn run_participant_async(
     let (connected_tx, connected_rx) = tokio::sync::watch::channel(false);
 
     { let track = Arc::clone(&session.video_track); let kf = Arc::clone(&force_keyframe);
-      tokio::spawn(async move { webrtc_session::run_encoding_loop(track, frame_rx, kf, connected_rx).await; }); }
+      let bitrate_rx = session.remb_tx.subscribe();
+      tokio::spawn(async move { webrtc_session::run_encoding_loop(track, frame_rx, kf, connected_rx, bitrate_rx).await; }); }
 
     let mut input_ctrl = input::InputController::new(get_primary_screen_dimensions().0, get_primary_screen_dimensions().1)?;
 
