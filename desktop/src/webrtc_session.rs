@@ -30,8 +30,7 @@ use webrtc::{
         RTCPeerConnection,
     },
     rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate,
-    rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
-    track::track_local::{
+    rtp_transceiver::rtp_codec::RTCRtpCodecCapability,    track::track_local::{
         track_local_static_sample::TrackLocalStaticSample, TrackLocal,
     },
 };
@@ -223,23 +222,18 @@ impl Session {
         let sender_rtcp = Arc::clone(&sender);
         let remb_tx_clone = self.remb_tx.clone();
         tokio::spawn(async move {
-            let mut rtcp_buf = vec![0u8; 1500];
             loop {
-                match sender_rtcp.read(&mut rtcp_buf).await {
-                    Ok((n, _)) => {
-                        // unmarshal expects &mut impl Bytes — use a bytes::Bytes slice.
-                        let mut buf = bytes::Bytes::copy_from_slice(&rtcp_buf[..n]);
-                        if let Ok(pkts) = webrtc::rtcp::packet::unmarshal(&mut buf) {
-                            for pkt in pkts {
-                                if let Some(remb) = pkt.as_any()
-                                    .downcast_ref::<ReceiverEstimatedMaximumBitrate>()
-                                {
-                                    // REMB bitrate is in bps — convert to kbps and
-                                    // clamp to [MIN_BITRATE_KBPS, MAX_BITRATE_KBPS].
-                                    let kbps = ((remb.bitrate / 1000.0) as u32)
-                                        .clamp(MIN_BITRATE_KBPS, MAX_BITRATE_KBPS);
-                                    let _ = remb_tx_clone.send(kbps);
-                                }
+                match sender_rtcp.read_rtcp().await {
+                    Ok((pkts, _)) => {
+                        for pkt in pkts {
+                            if let Some(remb) = pkt.as_any()
+                                .downcast_ref::<ReceiverEstimatedMaximumBitrate>()
+                            {
+                                // REMB bitrate is in bps — convert to kbps and
+                                // clamp to [MIN_BITRATE_KBPS, MAX_BITRATE_KBPS].
+                                let kbps = ((remb.bitrate / 1000.0) as u32)
+                                    .clamp(MIN_BITRATE_KBPS, MAX_BITRATE_KBPS);
+                                let _ = remb_tx_clone.send(kbps);
                             }
                         }
                     }
